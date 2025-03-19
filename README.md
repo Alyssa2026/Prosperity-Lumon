@@ -15,6 +15,12 @@
 
 Make a python 3.12 enviornment and install requirements.txt
 
+Use this command to run
 ```console
-prosperity3bt tutorial/example-program.py 0 --vis
+prosperity3bt tutorial/example-program.py 0 --vis --match-trades worse
 ```
+prosperity3bt is the backtester command
+tutorial/example-program.py path to trader file
+0 is the day to run the backtester for
+--vis is to open results in visualiser 
+--match-trades worse (need to test which option is most accurate but from reading chat sounds like this is it)
