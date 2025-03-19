@@ -142,7 +142,7 @@ class Trader:
                 orders: list[Order] = []
 
                 # Note that this value of 1 is just a dummy value, you should likely change it!
-                acceptable_price = 10
+                acceptable_price = 2015 if product == "KELP" else 10000
 
                 # If statement checks if there are any SELL orders in the market
                 if len(order_depth.sell_orders) > 0:
