@@ -1,0 +1,11 @@
+jsonpickle
+jupyterlab
+matplotlib
+numpy
+pandas
+plotly
+randomcolor
+scikit-learn
+tqdm
+prosperity3submit
+prosperity3bt

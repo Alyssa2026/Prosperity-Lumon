@@ -10,3 +10,11 @@
 - [IMC Prosperity 3 Submitter](https://github.com/jmerle/imc-prosperity-3-submitter)  
 - [IMC Prosperity 3 Backtester](https://github.com/jmerle/imc-prosperity-3-backtester)  
 - [IMC Prosperity 3 Visualizer](https://github.com/jmerle/imc-prosperity-3-visualizer)  
+
+## Contributing
+
+Make a python 3.12 enviornment and install requirements.txt
+
+```console
+prosperity3bt tutorial/example-program.py 0 --vis
+```
