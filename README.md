@@ -19,8 +19,8 @@ Use this command to run
 ```console
 prosperity3bt tutorial/example-program.py 0 --vis --match-trades worse
 ```
-prosperity3bt is the backtester command
-tutorial/example-program.py path to trader file
-0 is the day to run the backtester for
---vis is to open results in visualiser 
---match-trades worse (need to test which option is most accurate but from reading chat sounds like this is it)
+1. prosperity3bt is the backtester command
+2. tutorial/example-program.py path to trader file
+3. 0 is the day to run the backtester for
+4. --vis is to open results in visualiser 
+5. --match-trades worse (need to test which option is most accurate but from reading chat sounds like this is it - matches your orders against trades that happened at worse prices than what you put out)
