@@ -229,9 +229,46 @@ class MarketMakingStrategy(Strategy):
         self.window = deque(data)
 
 class KelpStrategy(MarketMakingStrategy):
-    def get_true_value(self, state: TradingState) -> int:
-        return 2_050
-class OtherStrategy(MarketMakingStrategy):
+    def __init__(self, symbol: Symbol, limit: int) -> None:
+        super().__init__(symbol, limit)
+        self.last_price = None  # Store the last mid-price for mean reversion
+
+    def get_true_value(self, state: TradingState) -> float:
+        order_depth = state.order_depths[self.symbol]
+
+        if not order_depth.sell_orders or not order_depth.buy_orders:
+            return self.last_price if self.last_price is not None else 2_020 # Default fair value
+
+        best_ask = min(order_depth.sell_orders.keys())
+        best_bid = max(order_depth.buy_orders.keys())
+
+        # filter offers with small volume
+        adverse_volume = 12 
+        filtered_ask = [price for price in order_depth.sell_orders if abs(order_depth.sell_orders[price]) >= adverse_volume]
+        filtered_bid = [price for price in order_depth.buy_orders if abs(order_depth.buy_orders[price]) >= adverse_volume]
+
+        mm_ask = min(filtered_ask) if filtered_ask else None
+        mm_bid = max(filtered_bid) if filtered_bid else None
+
+        # compute fair
+        if mm_ask is None or mm_bid is None:
+            mid_price = (best_ask + best_bid) / 2
+        else:
+            mid_price = (mm_ask + mm_bid) / 2
+
+        # predict using last round price
+        reversion_beta = 0.1  # Tune this parameter
+        if self.last_price is not None:
+            last_returns = (mid_price - self.last_price) / self.last_price
+            pred_returns = last_returns * reversion_beta
+            fair_value = mid_price + (mid_price * pred_returns)
+        else:
+            fair_value = mid_price
+
+        self.last_price = mid_price  # Update last price for next iteration
+        return fair_value
+
+class RainforestResinStrategy(MarketMakingStrategy):
     def get_true_value(self, state: TradingState) -> int:
         return 10_000
 
@@ -239,13 +276,14 @@ class OtherStrategy(MarketMakingStrategy):
 class Trader:
     def __init__(self) -> None:
         limits = {
-            "KELP": 10,
-            "OTHER": 10  # You can update the limit for other symbols as needed
+            "KELP": 50,
+            "RAINFOREST_RESIN": 50  # You can update the limit for other symbols as needed
         }
 
         # Assign strategies: KelpStrategy for "KELP", OtherStrategy for everything else
         self.strategies = {
-            "KELP": KelpStrategy("KELP", limits["KELP"])
+            "KELP": KelpStrategy("KELP", limits["KELP"]),
+            "RAINFOREST_RESIN": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"])
         }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
@@ -261,9 +299,9 @@ class Trader:
 
         orders = {}
         for symbol in state.order_depths:
-            if symbol not in self.strategies:
-                # Assign OtherStrategy dynamically for non-KELP symbols
-                self.strategies[symbol] = OtherStrategy(symbol, 10)  # Update limit if needed
+            # if symbol not in self.strategies:
+            #     # Assign OtherStrategy dynamically for non-KELP symbols
+            #     self.strategies[symbol] = OtherStrategy(symbol, 10)  # Update limit if needed
 
             strategy = self.strategies[symbol]
 
