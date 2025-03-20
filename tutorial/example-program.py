@@ -1,8 +1,10 @@
 import json
-from typing import Any, Dict, List 
-
+from abc import abstractmethod
+from collections import deque
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
+from typing import Any, Dict, List, TypeAlias
 
+JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
 class Logger:
     def __init__(self) -> None:
@@ -120,69 +122,158 @@ class Logger:
 
 logger = Logger()
 
+class Strategy:
+    def __init__(self, symbol: str, limit: int) -> None:
+        self.symbol = symbol
+        self.limit = limit
+
+    @abstractmethod
+    def act(self, state: TradingState) -> None:
+        raise NotImplementedError()
+
+    def run(self, state: TradingState) -> list[Order]:
+        self.orders = []
+        self.act(state)
+        return self.orders
+
+    def buy(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, price, quantity))
+
+    def sell(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, price, -quantity))
+
+    def save(self) -> JSON:
+        return None
+
+    def load(self, data: JSON) -> None:
+        pass
+
+class MarketMakingStrategy(Strategy):
+    def __init__(self, symbol: Symbol, limit: int) -> None:
+        super().__init__(symbol, limit)
+
+        self.window = deque()
+        self.window_size = 10
+
+    @abstractmethod
+    def get_true_value(state: TradingState) -> int:
+        raise NotImplementedError()
+
+    def act(self, state: TradingState) -> None:
+        true_value = self.get_true_value(state)
+
+        order_depth = state.order_depths[self.symbol]
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
+
+        position = state.position.get(self.symbol, 0)
+        to_buy = self.limit - position
+        to_sell = self.limit + position
+
+        self.window.append(abs(position) == self.limit)
+        if len(self.window) > self.window_size:
+            self.window.popleft()
+
+        soft_liquidate = len(self.window) == self.window_size and sum(self.window) >= self.window_size / 2 and self.window[-1]
+        hard_liquidate = len(self.window) == self.window_size and all(self.window)
+
+        max_buy_price = true_value - 1 if position > self.limit * 0.5 else true_value
+        min_sell_price = true_value + 1 if position < self.limit * -0.5 else true_value
+
+        for price, volume in sell_orders:
+            if to_buy > 0 and price <= max_buy_price:
+                quantity = min(to_buy, -volume)
+                self.buy(price, quantity)
+                to_buy -= quantity
+
+        if to_buy > 0 and hard_liquidate:
+            quantity = to_buy // 2
+            self.buy(true_value, quantity)
+            to_buy -= quantity
+
+        if to_buy > 0 and soft_liquidate:
+            quantity = to_buy // 2
+            self.buy(true_value - 2, quantity)
+            to_buy -= quantity
+
+        if to_buy > 0:
+            popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
+            price = min(max_buy_price, popular_buy_price + 1)
+            self.buy(price, to_buy)
+
+        for price, volume in buy_orders:
+            if to_sell > 0 and price >= min_sell_price:
+                quantity = min(to_sell, volume)
+                self.sell(price, quantity)
+                to_sell -= quantity
+
+        if to_sell > 0 and hard_liquidate:
+            quantity = to_sell // 2
+            self.sell(true_value, quantity)
+            to_sell -= quantity
+
+        if to_sell > 0 and soft_liquidate:
+            quantity = to_sell // 2
+            self.sell(true_value + 2, quantity)
+            to_sell -= quantity
+
+        if to_sell > 0:
+            popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
+            price = max(min_sell_price, popular_sell_price - 1)
+            self.sell(price, to_sell)
+
+    def save(self) -> JSON:
+        return list(self.window)
+
+    def load(self, data: JSON) -> None:
+        self.window = deque(data)
+
+class KelpStrategy(MarketMakingStrategy):
+    def get_true_value(self, state: TradingState) -> int:
+        return 2_050
+class OtherStrategy(MarketMakingStrategy):
+    def get_true_value(self, state: TradingState) -> int:
+        return 10_000
+
+
 class Trader:
+    def __init__(self) -> None:
+        limits = {
+            "KELP": 10,
+            "OTHER": 10  # You can update the limit for other symbols as needed
+        }
+
+        # Assign strategies: KelpStrategy for "KELP", OtherStrategy for everything else
+        self.strategies = {
+            "KELP": KelpStrategy("KELP", limits["KELP"])
+        }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
         """
-        Only method required. It takes all buy and sell orders for all symbols as an input,
-        and outputs a list of orders to be sent
+        Processes market orders and determines appropriate actions per strategy.
+        Uses KelpStrategy for KELP and OtherStrategy for all other symbols.
         """
-        # Initialize the method output dict as an empty dict
-        result = {}
+        logger.print(state.position)
+
         conversions = 0
-        trader_data = ""
+        old_trader_data = json.loads(state.traderData) if state.traderData != "" else {}
+        new_trader_data = {}
 
-        # Iterate over all the keys (the available products) contained in the order dephts
-        for product in state.order_depths.keys():
+        orders = {}
+        for symbol in state.order_depths:
+            if symbol not in self.strategies:
+                # Assign OtherStrategy dynamically for non-KELP symbols
+                self.strategies[symbol] = OtherStrategy(symbol, 10)  # Update limit if needed
 
-                # Retrieve the Order Depth containing all the market BUY and SELL orders
-                order_depth: OrderDepth = state.order_depths[product]
+            strategy = self.strategies[symbol]
 
-                # Initialize the list of Orders to be sent as an empty list
-                orders: list[Order] = []
+            if symbol in old_trader_data:
+                strategy.load(old_trader_data.get(symbol, None))
 
-                # Note that this value of 1 is just a dummy value, you should likely change it!
-                acceptable_price = 2015 if product == "KELP" else 10000
+            orders[symbol] = strategy.run(state)
+            new_trader_data[symbol] = strategy.save()
 
-                # If statement checks if there are any SELL orders in the market
-                if len(order_depth.sell_orders) > 0:
+        trader_data = json.dumps(new_trader_data, separators=(",", ":"))
 
-                    # Sort all the available sell orders by their price,
-                    # and select only the sell order with the lowest price
-                    best_ask = min(order_depth.sell_orders.keys())
-                    best_ask_volume = order_depth.sell_orders[best_ask]
-
-                    # Check if the lowest ask (sell order) is lower than the above defined fair value
-                    if best_ask < acceptable_price:
-
-                        # In case the lowest ask is lower than our fair value,
-                        # This presents an opportunity for us to buy cheaply
-                        # The code below therefore sends a BUY order at the price level of the ask,
-                        # with the same quantity
-                        # We expect this order to trade with the sell order
-                        logger.print("BUY", str(-best_ask_volume) + "x", best_ask)
-                        orders.append(Order(product, best_ask, -best_ask_volume))
-
-                # The below code block is similar to the one above,
-                # the difference is that it find the highest bid (buy order)
-                # If the price of the order is higher than the fair value
-                # This is an opportunity to sell at a premium
-                if len(order_depth.buy_orders) != 0:
-                    best_bid = max(order_depth.buy_orders.keys())
-                    best_bid_volume = order_depth.buy_orders[best_bid]
-                    if best_bid > acceptable_price:
-                        logger.print("SELL", str(best_bid_volume) + "x", best_bid)
-                        orders.append(Order(product, best_bid, -best_bid_volume))
-
-                # Add all the above the orders to the result dict
-                result[product] = orders
-                
-        traderData = "SAMPLE" # String value holding Trader state data required. It will be delivered as TradingState.traderData on next execution.
-        
-        conversions = 1 
-
-                # Return the dict of orders
-                # These possibly contain buy or sell orders
-                # Depending on the logic above
-        logger.flush(state, result, conversions, trader_data)
-        return result, conversions, traderData
+        logger.flush(state, orders, conversions, trader_data)
+        return orders, conversions, trader_data

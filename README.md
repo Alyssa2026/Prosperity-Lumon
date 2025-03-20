@@ -13,7 +13,12 @@
 
 ## Contributing
 
-Make a python 3.12 enviornment and install requirements.txt
+Use the following commands to make a python 3.12 enviornment and install requirements.txt (make sure you have conda)
+```
+conda create --name lumon python=3.12
+conda activate lumon
+pip install -r requirements.txt   
+```
 
 Use this command to run
 ```console
