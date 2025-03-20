@@ -233,7 +233,7 @@ class KelpStrategy(MarketMakingStrategy):
         super().__init__(symbol, limit)
         self.last_price = None  # Store the last mid-price for mean reversion
 
-    def get_true_value(self, state: TradingState) -> float:
+    def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
 
         if not order_depth.sell_orders or not order_depth.buy_orders:
@@ -266,7 +266,7 @@ class KelpStrategy(MarketMakingStrategy):
             fair_value = mid_price
 
         self.last_price = mid_price  # Update last price for next iteration
-        return fair_value
+        return int(fair_value+0.1)
 
 class RainforestResinStrategy(MarketMakingStrategy):
     def get_true_value(self, state: TradingState) -> int:
