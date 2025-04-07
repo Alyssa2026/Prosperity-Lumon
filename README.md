@@ -9,6 +9,9 @@
 ## Algo Writing Wiki  
 [Writing an Algorithm in Python](https://imc-prosperity.notion.site/Writing-an-Algorithm-in-Python-19ee8453a0938114a15eca1124bf28a1#19ee8453a09381638ed3cbd18cc93f28)  
 
+## Previous Manual 
+[Manual Git] (https://github.com/gabsens/IMC-Prosperity-2-Manual/tree/master)
+
 ## Top Placing Git 
 - [Second Place](https://github.com/ericcccsliu/imc-prosperity-2/blob/main/README.md)
 
