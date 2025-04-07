@@ -59,7 +59,7 @@ class Logger:
     def compress_listings(self, listings: dict[Symbol, Listing]) -> list[list[Any]]:
         compressed = []
         for listing in listings.values():
-            compressed.append([listing["symbol"], listing["product"], listing["denomination"]])
+            compressed.append([listing.symbol, listing.product, listing.denomination])
 
         return compressed
 
@@ -283,7 +283,8 @@ class Trader:
         # Assign strategies: KelpStrategy for "KELP", OtherStrategy for everything else
         self.strategies = {
             "KELP": KelpStrategy("KELP", limits["KELP"]),
-            "RAINFOREST_RESIN": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"])
+            "RAINFOREST_RESIN": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"]),
+            "SQUID_INK": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"]),
         }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
