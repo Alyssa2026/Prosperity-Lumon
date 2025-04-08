@@ -1,6 +1,8 @@
 import json
 from abc import abstractmethod
 from collections import deque
+
+import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 from typing import Any, Dict, List, TypeAlias
 
@@ -59,7 +61,7 @@ class Logger:
     def compress_listings(self, listings: dict[Symbol, Listing]) -> list[list[Any]]:
         compressed = []
         for listing in listings.values():
-            compressed.append([listing["symbol"], listing["product"], listing["denomination"]])
+            compressed.append([listing.symbol, listing.product, listing.denomination])
 
         return compressed
 
@@ -237,7 +239,7 @@ class KelpStrategy(MarketMakingStrategy):
         order_depth = state.order_depths[self.symbol]
 
         if not order_depth.sell_orders or not order_depth.buy_orders:
-            return self.last_price if self.last_price is not None else 2_020 # Default fair value
+            return self.last_price if self.last_price is not None else 2_000 # Default fair value
 
         best_ask = min(order_depth.sell_orders.keys())
         best_bid = max(order_depth.buy_orders.keys())
@@ -271,18 +273,51 @@ class KelpStrategy(MarketMakingStrategy):
 class RainforestResinStrategy(MarketMakingStrategy):
     def get_true_value(self, state: TradingState) -> int:
         return 10_000
-    
 
 class SquidInkStrategy(MarketMakingStrategy):
+    def __init__(self, symbol: Symbol, limit: int) -> None:
+        super().__init__(symbol, limit)
+        self.last_price = None  # Track last observed mid-price
+
     def get_true_value(self, state: TradingState) -> int:
-        return 10_000
+        order_depth = state.order_depths[self.symbol]
+
+        if not order_depth.sell_orders or not order_depth.buy_orders:
+            return self.last_price if self.last_price is not None else 10_000  # Fallback fair value
+
+        best_ask = min(order_depth.sell_orders.keys())
+        best_bid = max(order_depth.buy_orders.keys())
+
+        # Filter out small-volume offers (helps with noisy quotes)
+        min_volume = 10
+        filtered_ask = [price for price, qty in order_depth.sell_orders.items() if abs(qty) >= min_volume]
+        filtered_bid = [price for price, qty in order_depth.buy_orders.items() if abs(qty) >= min_volume]
+
+        mm_ask = min(filtered_ask) if filtered_ask else best_ask
+        mm_bid = max(filtered_bid) if filtered_bid else best_bid
+
+        # Calculate mid-price
+        mid_price = (mm_ask + mm_bid) / 2
+
+        # Mean reversion....?
+        reversion_strength = 0.1
+        if self.last_price is not None:
+            price_change = (mid_price - self.last_price) / self.last_price
+            adjusted_mid = mid_price - (price_change * reversion_strength * mid_price)
+        else:
+            adjusted_mid = mid_price
+
+        self.last_price = mid_price  # Save for next round
+        return int(adjusted_mid + 0.1)
+
+
 
 
 class Trader:
     def __init__(self) -> None:
         limits = {
             "KELP": 50,
-            "RAINFOREST_RESIN": 50 , 
+            "RAINFOREST_RESIN": 50, 
             "SQUID_INK": 50
         }
 
@@ -290,7 +325,7 @@ class Trader:
         self.strategies = {
             "KELP": KelpStrategy("KELP", limits["KELP"]),
             "RAINFOREST_RESIN": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"]),
-            "SQUID_INK":SquidInkStrategy("SQUID_INK", limits["SQUID_INK"])
+            "SQUID_INK": SquidInkStrategy("SQUID_INK", limits["SQUID_INK"]),
         }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
@@ -306,7 +341,6 @@ class Trader:
 
         orders = {}
         for symbol in state.order_depths:
-            
             strategy = self.strategies[symbol]
 
             if symbol in old_trader_data:
