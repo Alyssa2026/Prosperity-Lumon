@@ -255,35 +255,31 @@ class RainforestResinStrategy(MarketMakingStrategy):
 class SquidInkStrategy(MarketMakingStrategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
-        self.price_window = deque(maxlen=20)
 
     def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
+        buy_orders = order_depth.buy_orders
+        sell_orders = order_depth.sell_orders
 
-        if not order_depth.sell_orders or not order_depth.buy_orders:
-            if self.price_window:
-                return int(statistics.mean(self.price_window))
-            return 2_000  
+        if not buy_orders or not sell_orders:
+            return 2_000  # Fallback if no market depth
 
-        best_ask = min(order_depth.sell_orders.keys())
-        best_bid = max(order_depth.buy_orders.keys())
-        mid_price = (best_ask + best_bid) / 2
+        # Compute VWAP for buy side (weighted by volume)
+        total_buy_volume = sum(buy_orders.values())
+        vwap_buy = sum(price * volume for price, volume in buy_orders.items()) / total_buy_volume if total_buy_volume else 0
 
-        self.price_window.append(mid_price)
-        if len(self.price_window) < self.price_window.maxlen:
-            return int(mid_price)
-        
-        mean_price = statistics.mean(self.price_window)
-        std_dev = statistics.stdev(self.price_window)
+        # Compute VWAP for sell side (weighted by volume)
+        total_sell_volume = sum(sell_orders.values())
+        vwap_sell = sum(price * volume for price, volume in sell_orders.items()) / total_sell_volume if total_sell_volume else 0
 
-        if std_dev == 0: 
-            fair_value = mid_price
-        else:
-            z_score = (mid_price - mean_price) / std_dev
-            reversion_strength = 0.01  
-            fair_value = mid_price - (z_score * std_dev * reversion_strength)
+        # Final VWAP = midpoint between weighted buy/sell
+        fair_value = (vwap_buy + vwap_sell) / 2
+
+        logger.print(f"SquidInkStrategy VWAP buy: {vwap_buy}, VWAP sell: {vwap_sell}, fair value: {fair_value}")
 
         return int(fair_value + 0.1)
+
+
     
 
 
@@ -294,7 +290,7 @@ class Trader:
         limits = {
             "KELP": 50,
             "RAINFOREST_RESIN": 50, 
-            "SQUID_INK": 50
+            "SQUID_INK": 50,
         }
 
         # Assign strategies: KelpStrategy for "KELP", OtherStrategy for everything else
