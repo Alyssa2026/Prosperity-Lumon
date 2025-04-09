@@ -258,6 +258,7 @@ class SquidInkStrategy(MarketMakingStrategy):
         self.price_window = deque(maxlen=10)
 
     def get_true_value(self, state: TradingState) -> int:
+        # TODO: Improve this 
         order_depth = state.order_depths[self.symbol]
 
         if not order_depth.sell_orders or not order_depth.buy_orders:
@@ -286,7 +287,11 @@ class SquidInkStrategy(MarketMakingStrategy):
                 reversion_strength = 0.01
             fair_value = mid_price - (z_score * std_dev * reversion_strength)
 
-        return int(fair_value + 0.1)
+        return round(fair_value)
+
+    def act(self, state: TradingState) -> None:
+        # TODO: modify according to ink behavior
+        pass
     
 
 
