@@ -234,42 +234,19 @@ class MarketMakingStrategy(Strategy):
 class KelpStrategy(MarketMakingStrategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
-        self.last_price = None  # Store the last mid-price for mean reversion
 
     def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
 
-        if not order_depth.sell_orders or not order_depth.buy_orders:
-            return self.last_price if self.last_price is not None else 2_000 # Default fair value
+        order_depth = state.order_depths[self.symbol]
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
 
-        best_ask = min(order_depth.sell_orders.keys())
-        best_bid = max(order_depth.buy_orders.keys())
+        popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
+        popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
 
-        # filter offers with small volume
-        adverse_volume = 12 
-        filtered_ask = [price for price in order_depth.sell_orders if abs(order_depth.sell_orders[price]) >= adverse_volume]
-        filtered_bid = [price for price in order_depth.buy_orders if abs(order_depth.buy_orders[price]) >= adverse_volume]
-
-        mm_ask = min(filtered_ask) if filtered_ask else None
-        mm_bid = max(filtered_bid) if filtered_bid else None
-
-        # compute fair
-        if mm_ask is None or mm_bid is None:
-            mid_price = (best_ask + best_bid) / 2
-        else:
-            mid_price = (mm_ask + mm_bid) / 2
-
-        # predict using last round price
-        reversion_beta = 0.1  # Tune this parameter
-        if self.last_price is not None:
-            last_returns = (mid_price - self.last_price) / self.last_price
-            pred_returns = last_returns * reversion_beta
-            fair_value = mid_price + (mid_price * pred_returns)
-        else:
-            fair_value = mid_price
-
-        self.last_price = mid_price  # Update last price for next iteration
-        return int(fair_value+0.1)
+        return round((popular_buy_price + popular_sell_price) / 2)
+        
 
 class RainforestResinStrategy(MarketMakingStrategy):
     def get_true_value(self, state: TradingState) -> int:
