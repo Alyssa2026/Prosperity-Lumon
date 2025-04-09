@@ -1,6 +1,7 @@
 import json
 from abc import abstractmethod
 from collections import deque
+import statistics
 
 import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
@@ -233,42 +234,19 @@ class MarketMakingStrategy(Strategy):
 class KelpStrategy(MarketMakingStrategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
-        self.last_price = None  # Store the last mid-price for mean reversion
 
     def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
 
-        if not order_depth.sell_orders or not order_depth.buy_orders:
-            return self.last_price if self.last_price is not None else 2_000 # Default fair value
+        order_depth = state.order_depths[self.symbol]
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
 
-        best_ask = min(order_depth.sell_orders.keys())
-        best_bid = max(order_depth.buy_orders.keys())
+        popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
+        popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
 
-        # filter offers with small volume
-        adverse_volume = 12 
-        filtered_ask = [price for price in order_depth.sell_orders if abs(order_depth.sell_orders[price]) >= adverse_volume]
-        filtered_bid = [price for price in order_depth.buy_orders if abs(order_depth.buy_orders[price]) >= adverse_volume]
-
-        mm_ask = min(filtered_ask) if filtered_ask else None
-        mm_bid = max(filtered_bid) if filtered_bid else None
-
-        # compute fair
-        if mm_ask is None or mm_bid is None:
-            mid_price = (best_ask + best_bid) / 2
-        else:
-            mid_price = (mm_ask + mm_bid) / 2
-
-        # predict using last round price
-        reversion_beta = 0.1  # Tune this parameter
-        if self.last_price is not None:
-            last_returns = (mid_price - self.last_price) / self.last_price
-            pred_returns = last_returns * reversion_beta
-            fair_value = mid_price + (mid_price * pred_returns)
-        else:
-            fair_value = mid_price
-
-        self.last_price = mid_price  # Update last price for next iteration
-        return int(fair_value+0.1)
+        return round((popular_buy_price + popular_sell_price) / 2)
+        
 
 class RainforestResinStrategy(MarketMakingStrategy):
     def get_true_value(self, state: TradingState) -> int:
@@ -277,38 +255,36 @@ class RainforestResinStrategy(MarketMakingStrategy):
 class SquidInkStrategy(MarketMakingStrategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
-        self.last_price = None  # Track last observed mid-price
+        self.price_window = deque(maxlen=20)
 
     def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
 
         if not order_depth.sell_orders or not order_depth.buy_orders:
-            return self.last_price if self.last_price is not None else 10_000  # Fallback fair value
+            if self.price_window:
+                return int(statistics.mean(self.price_window))
+            return 2_000  
 
         best_ask = min(order_depth.sell_orders.keys())
         best_bid = max(order_depth.buy_orders.keys())
+        mid_price = (best_ask + best_bid) / 2
 
-        # Filter out small-volume offers (helps with noisy quotes)
-        min_volume = 10
-        filtered_ask = [price for price, qty in order_depth.sell_orders.items() if abs(qty) >= min_volume]
-        filtered_bid = [price for price, qty in order_depth.buy_orders.items() if abs(qty) >= min_volume]
+        self.price_window.append(mid_price)
+        if len(self.price_window) < self.price_window.maxlen:
+            return int(mid_price)
+        
+        mean_price = statistics.mean(self.price_window)
+        std_dev = statistics.stdev(self.price_window)
 
-        mm_ask = min(filtered_ask) if filtered_ask else best_ask
-        mm_bid = max(filtered_bid) if filtered_bid else best_bid
-
-        # Calculate mid-price
-        mid_price = (mm_ask + mm_bid) / 2
-
-        # Mean reversion....?
-        reversion_strength = 0.1
-        if self.last_price is not None:
-            price_change = (mid_price - self.last_price) / self.last_price
-            adjusted_mid = mid_price - (price_change * reversion_strength * mid_price)
+        if std_dev == 0: 
+            fair_value = mid_price
         else:
-            adjusted_mid = mid_price
+            z_score = (mid_price - mean_price) / std_dev
+            reversion_strength = 0.01  
+            fair_value = mid_price - (z_score * std_dev * reversion_strength)
 
-        self.last_price = mid_price  # Save for next round
-        return int(adjusted_mid + 0.1)
+        return int(fair_value + 0.1)
+    
 
 
 
