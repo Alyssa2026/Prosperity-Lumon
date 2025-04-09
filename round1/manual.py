@@ -1,5 +1,8 @@
 
 
+from collections import defaultdict
+
+
 adj_lists = {
  'snowball': [('pizza', 1.45), ('silicon nugget', 0.52), ('seashell', 0.72)],
  'pizza': [('snowball', 0.7), ('silicon nugget', 0.31), ('seashell', 0.48)],
@@ -14,14 +17,22 @@ curr_trades = []
 max_change = 1
 max_change_trades = []
 
+dp = defaultdict(int) 
+
 def dfs(curr_item, curr_change, num_trades = 5):
     global max_change, max_change_trades
+    if dp[(curr_item, num_trades)] >= curr_change:
+        return
+    
+    dp[(curr_item, num_trades)] = curr_change
+
     if num_trades == 0:
         if curr_item == final_item and curr_change > max_change:
             max_change_trades = curr_trades.copy()
             max_change = curr_change
         return
     
+
     for next_item, change in adj_lists[curr_item]:
         curr_trades.append(next_item)
         dfs(next_item, curr_change * change, num_trades - 1)
