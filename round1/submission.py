@@ -180,8 +180,8 @@ class MarketMakingStrategy(Strategy):
         soft_liquidate = len(self.window) == self.window_size and sum(self.window) >= self.window_size / 2 and self.window[-1]
         hard_liquidate = len(self.window) == self.window_size and all(self.window)
 
-        max_buy_price = true_value - 1 if position > self.limit * 0.5 else true_value
-        min_sell_price = true_value + 1 if position < self.limit * -0.5 else true_value
+        max_buy_price = true_value - 1 if position > self.limit * 0.4 else true_value
+        min_sell_price = true_value + 1 if position < self.limit * -0.4 else true_value
 
         for price, volume in sell_orders:
             if to_buy > 0 and price <= max_buy_price:
@@ -255,35 +255,147 @@ class RainforestResinStrategy(MarketMakingStrategy):
 class SquidInkStrategy(MarketMakingStrategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
-        self.price_window = deque(maxlen=20)
-
+        self.price_window = deque(maxlen=3)
+        self.window = deque(maxlen=5)  # Track how long we've been at position limits
+        self.window_size = 5  # Define window size for position limit tracking
+    
     def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
 
-        if not order_depth.sell_orders or not order_depth.buy_orders:
-            if self.price_window:
-                return int(statistics.mean(self.price_window))
-            return 2_000  
+        # Handle empty order book case
+        if not buy_orders or not sell_orders:
+            return state.mid_price.get(self.symbol, 0)
+            
+        popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
+        popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
 
-        best_ask = min(order_depth.sell_orders.keys())
-        best_bid = max(order_depth.buy_orders.keys())
-        mid_price = (best_ask + best_bid) / 2
-
-        self.price_window.append(mid_price)
-        if len(self.price_window) < self.price_window.maxlen:
-            return int(mid_price)
+        return round((popular_buy_price + popular_sell_price) / 2)
+    
+    def act(self, state: TradingState) -> None:
+        true_value = self.get_true_value(state)
         
-        mean_price = statistics.mean(self.price_window)
-        std_dev = statistics.stdev(self.price_window)
+        # Add to price window for Bollinger Band calculation
+        self.price_window.append(true_value)
+        if len(self.price_window) < self.price_window.maxlen:
+            return  # Wait until we have enough data
+            
+        order_depth = state.order_depths[self.symbol]
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
+        
+        position = state.position.get(self.symbol, 0)
+        remaining_buy_capacity = self.limit - position
+        remaining_sell_capacity = self.limit + position
+        
+        # Track position limit status
+        at_position_limit = abs(position) >= self.limit * 0.9 # Consider close to limit
+        self.window.append(at_position_limit)
+        
+        # Calculate liquidation signals
+        soft_liquidate = len(self.window) == self.window_size and sum(self.window) >= self.window_size / 2
+        hard_liquidate = len(self.window) == self.window_size and all(self.window)
+        
+        # Calculate Bollinger Bands
+        mean = statistics.mean(self.price_window)
+        std = statistics.stdev(self.price_window)
+        
+        # Adjust band width based on volatility
+        band_width = 1.5  # Start with standard width
+        if std > 10:  # High volatility
+            band_width = 2.0  # Widen bands
+        
+        upper_band = mean + band_width * std
+        lower_band = mean - band_width * std
+        
+        # Calculate a position target based on band position
+        # When price is high (above upper band), we want to be short
+        # When price is low (below lower band), we want to be long
+        # When price is in band, we want to be neutral or reducing positions
+        
+        target_position = 0
+        
+        if true_value > upper_band:
+            # Bearish - want to be short
+            band_position = (true_value - upper_band) / std
+            target_position = max(-self.limit, int(-self.limit * min(1.0, band_position)))
+        elif true_value < lower_band:
+            # Bullish - want to be long
+            band_position = (lower_band - true_value) / std
+            target_position = min(self.limit, int(self.limit * min(1.0, band_position)))
+            
+        # Adjust target based on liquidation signals
+        if hard_liquidate:
+            target_position = 0  # Force to neutral
+        elif soft_liquidate:
+            target_position = int(target_position * 0.5)  # Reduce target
+            
+        # Calculate target order size
+        order_size = target_position - position
+        
+        # Execute trades
+        if order_size > 0:  # Need to buy
+            # Fill existing sell orders at favorable prices
+            for price, volume in sell_orders:
+                if remaining_buy_capacity <= 0 or order_size <= 0:
+                    break
+                    
+                # Only buy if price is reasonable
+                if price <= true_value - (0.5 * std) or price <= lower_band:
+                    quantity = min(remaining_buy_capacity, -volume, order_size)
+                    if quantity > 0:
+                        self.buy(price, quantity)
+                        remaining_buy_capacity -= quantity
+                        order_size -= quantity
+            
+            # Place new buy orders at aggressive price if still needed
+            if order_size > 0 and remaining_buy_capacity > 0:
+                # More aggressive when price is below lower band
+                price_offset = 1 if true_value >= lower_band else 2
+                price = true_value - price_offset
+                self.buy(price, min(order_size, remaining_buy_capacity))
+                
+        elif order_size < 0:  # Need to sell
+            order_size = abs(order_size)
+            
+            # Fill existing buy orders at favorable prices
+            for price, volume in buy_orders:
+                if remaining_sell_capacity <= 0 or order_size <= 0:
+                    break
+                    
+                # Only sell if price is reasonable
+                if price >= true_value + (0.5 * std) or price >= upper_band:
+                    quantity = min(remaining_sell_capacity, volume, order_size)
+                    if quantity > 0:
+                        self.sell(price, quantity)
+                        remaining_sell_capacity -= quantity
+                        order_size -= quantity
+            
+            # Place new sell orders at aggressive price if still needed
+            if order_size > 0 and remaining_sell_capacity > 0:
+                # More aggressive when price is above upper band
+                price_offset = 1 if true_value <= upper_band else 2
+                price = true_value + price_offset
+                self.sell(price, min(order_size, remaining_sell_capacity))
 
-        if std_dev == 0: 
-            fair_value = mid_price
-        else:
-            z_score = (mid_price - mean_price) / std_dev
-            reversion_strength = 0.01  
-            fair_value = mid_price - (z_score * std_dev * reversion_strength)
+        # Always provide some liquidity regardless of position
+        if remaining_buy_capacity > 0:
+            # Place limit orders slightly below market
+            bid_price = true_value - 3 if at_position_limit else true_value - 1
+            self.buy(bid_price, remaining_buy_capacity // 4)
+            
+        if remaining_sell_capacity > 0:
+            # Place limit orders slightly above market
+            ask_price = true_value + 3 if at_position_limit else true_value + 1
+            self.sell(ask_price, remaining_sell_capacity // 4)
+        
+    
 
-        return int(fair_value + 0.1)
+
+        
+    
+
     
 
 
