@@ -255,9 +255,10 @@ class RainforestResinStrategy(MarketMakingStrategy):
 class SquidInkStrategy(MarketMakingStrategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
-        self.price_window = deque(maxlen=20)
+        self.price_window = deque(maxlen=10)
 
     def get_true_value(self, state: TradingState) -> int:
+        # TODO: Improve this 
         order_depth = state.order_depths[self.symbol]
 
         if not order_depth.sell_orders or not order_depth.buy_orders:
@@ -280,10 +281,17 @@ class SquidInkStrategy(MarketMakingStrategy):
             fair_value = mid_price
         else:
             z_score = (mid_price - mean_price) / std_dev
-            reversion_strength = 0.01  
+            if abs(std_dev-1)>1.1:
+                reversion_strength = 0.05
+            else:
+                reversion_strength = 0.01
             fair_value = mid_price - (z_score * std_dev * reversion_strength)
 
-        return int(fair_value + 0.1)
+        return round(fair_value)
+
+    def act(self, state: TradingState) -> None:
+        # TODO: modify according to ink behavior
+        pass
     
 
 
