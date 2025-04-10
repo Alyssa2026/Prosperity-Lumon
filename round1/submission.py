@@ -290,7 +290,7 @@ class SquidInkStrategy(MarketMakingStrategy):
         remaining_sell_capacity = self.limit + position
         
         # Track position limit status
-        at_position_limit = abs(position) >= self.limit * 0.75 # Consider close to limit
+        at_position_limit = abs(position) >= self.limit * 0.9 # Consider close to limit
         self.window.append(at_position_limit)
         
         # Calculate liquidation signals
