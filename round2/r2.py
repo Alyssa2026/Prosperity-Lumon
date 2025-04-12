@@ -392,11 +392,14 @@ class SquidInkStrategy(MarketMakingStrategy):
             self.sell(ask_price, remaining_sell_capacity // 4)
     
 
-class PicnicBasket1ArbitrageStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int) -> None:
-        super().__init__(symbol, limit)
+class CombinedBasketStrategy(Strategy):
+            
+    def __init__(self, symbol, limit, components, threshold) -> None:
+        super().__init__(symbol, limit)  # Base class still needs a single limit
+        self.components = components
+        self.threshold = threshold
 
-    def get_mid_price(self, state: TradingState, symbol: str) -> float:
+    def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
         order_depth = state.order_depths.get(symbol)
         if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
             return None
@@ -405,65 +408,47 @@ class PicnicBasket1ArbitrageStrategy(Strategy):
         popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
         popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
         return (popular_buy_price + popular_sell_price) / 2
-
+    
     def act(self, state: TradingState) -> None:
-        for symbol in ["CROISSANTS", "JAMS", "DJEMBES", "PICNIC_BASKET1"]:
-            if symbol not in state.order_depths:
-                return
-
-        croissant = self.get_mid_price(state, "CROISSANTS")
-        jam = self.get_mid_price(state, "JAMS")
-        djembe = self.get_mid_price(state, "DJEMBES")
-        basket1 = self.get_mid_price(state, "PICNIC_BASKET1")
-
-        if None in (croissant, jam, djembe, basket1):
+        
+        mid_prices = {self.symbol: self.get_mid_price(state, self.symbol)}
+        
+        for symbol in self.components.keys():
+            if symbol in state.order_depths:
+                mid_prices[symbol] = self.get_mid_price(state, symbol)
+        
+        if not all(item in mid_prices for item in self.components):
             return
 
-        basket1_fair = 6 * croissant + 3 * jam + djembe
-        diff = basket1 - basket1_fair
-        lower, upper = -80, 90
+        fair_value = sum(qty * mid_prices[item] for item, qty in self.components.items())
+        basket_market_price = mid_prices[self.symbol]
+        diff = basket_market_price - fair_value
+        lower, upper = self.threshold
 
         if diff < lower:
-            self.buy(int(basket1), self.limit)
+            self.go_long(state, self.limit)
         elif diff > upper:
-            self.sell(int(basket1), self.limit)
+            self.go_short(state, self.limit)
 
 
-class PicnicBasket2ArbitrageStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int) -> None:
-        super().__init__(symbol, limit)
+    def go_long(self, state: TradingState, limit) -> None:
+        order_depth = state.order_depths[self.symbol]
+        price = max(order_depth.sell_orders.keys())
 
-    def get_mid_price(self, state: TradingState, symbol: str) -> float:
-        order_depth = state.order_depths.get(symbol)
-        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
-        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
-        sell_orders = sorted(order_depth.sell_orders.items())
-        popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
-        popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
-        return (popular_buy_price + popular_sell_price) / 2
+        position = state.position.get(self.symbol, 0)
+        to_buy = limit - position
 
-    def act(self, state: TradingState) -> None:
-        pass
-        for symbol in ["CROISSANTS", "JAMS", "PICNIC_BASKET2"]:
-            if symbol not in state.order_depths:
-                return
+        self.buy(price, to_buy)
 
-        croissant = self.get_mid_price(state, "CROISSANTS")
-        jam = self.get_mid_price(state, "JAMS")
-        basket2 = self.get_mid_price(state, "PICNIC_BASKET2")
+    def go_short(self, state: TradingState, limit) -> None:
+        order_depth = state.order_depths[self.symbol]
+        price = min(order_depth.buy_orders.keys())
 
-        if None in (croissant, jam, basket2):
-            return
+        position = state.position.get(self.symbol, 0)
+        to_sell = limit + position
 
-        basket2_fair = 4 * croissant + 2 * jam
-        diff = basket2 - basket2_fair
-        lower, upper = -80, 70
+        self.sell(price, to_sell)
 
-        if diff < lower:
-            self.buy(int(basket2), self.limit)
-        elif diff > upper:
-            self.sell(int(basket2), self.limit)
 
 
 class Trader:
@@ -479,7 +464,6 @@ class Trader:
             "PICNIC_BASKET2": 100, 
         }
 
-        # Assign strategies: KelpStrategy for "KELP", OtherStrategy for everything else
         self.strategies = {
             "KELP": KelpStrategy("KELP", limits["KELP"]),
             "RAINFOREST_RESIN": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"]),
@@ -487,8 +471,8 @@ class Trader:
             "CROISSANTS": Strategy("CROISSANTS", limits["CROISSANTS"]),
             "JAMS": Strategy("JAMS", limits["JAMS"]),
             "DJEMBES": Strategy("DJEMBES", limits["DJEMBES"]),
-            "PICNIC_BASKET1": PicnicBasket1ArbitrageStrategy("PICNIC_BASKET1", limits["PICNIC_BASKET1"]),
-            "PICNIC_BASKET2": PicnicBasket2ArbitrageStrategy("PICNIC_BASKET2", limits["PICNIC_BASKET2"]),
+            "PICNIC_BASKET1": CombinedBasketStrategy("PICNIC_BASKET1", limits["PICNIC_BASKET1"], {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1}, (-40, 70)),
+            "PICNIC_BASKET2": CombinedBasketStrategy("PICNIC_BASKET2", limits["PICNIC_BASKET2"], {"CROISSANTS": 4, "JAMS": 2}, (-100, 60)),
         }
 
 
