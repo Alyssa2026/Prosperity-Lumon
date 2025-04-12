@@ -466,7 +466,7 @@ class Trader:
             "PICNIC_BASKET1": CombinedBasketStrategy(
                 "PICNIC_BASKET1", limits["PICNIC_BASKET1"],
                 {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
-                buy_z=2.0, sell_z=1.0,
+                buy_z=0.8, sell_z=1.0,
                 mean=48.76, std=85.91  # Replace with your real Basket 1 stats
             ),
             "PICNIC_BASKET2": CombinedBasketStrategy(
