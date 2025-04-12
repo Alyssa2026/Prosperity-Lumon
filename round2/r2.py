@@ -394,11 +394,12 @@ class SquidInkStrategy(MarketMakingStrategy):
 
 class CombinedBasketStrategy(Strategy):
     def __init__(self, symbol: str, limit: int, components: dict[str, int],
-                 buy_z: float, sell_z: float, mean: float, std: float) -> None:
+                 buy_z: float, sell_z: float, exit_z: float, mean: float, std: float) -> None:
         super().__init__(symbol, limit)
         self.components = components
         self.buy_z = buy_z
         self.sell_z = sell_z
+        self.exit_z = exit_z
         self.mean = mean
         self.std = std
 
@@ -422,23 +423,40 @@ class CombinedBasketStrategy(Strategy):
         market_price = mid_prices[self.symbol]
         diff = market_price - fair_value
         z = (diff - self.mean) / self.std if self.std != 0 else 0
+        position = state.position.get(self.symbol, 0)
 
-        if z < -self.buy_z:
+        if z < -self.buy_z and position < self.limit:
             self.go_long(state)
-        elif z > self.sell_z:
+        elif z > self.sell_z and position > -self.limit:
             self.go_short(state)
+        elif abs(z) < self.exit_z and position != 0:
+            self.close_position(state, position)
 
     def go_long(self, state: TradingState) -> None:
         order_depth = state.order_depths[self.symbol]
         price = max(order_depth.sell_orders.keys())
         position = state.position.get(self.symbol, 0)
-        self.buy(price, self.limit - position)
+        to_buy = self.limit - position
+        self.buy(price, to_buy)
 
     def go_short(self, state: TradingState) -> None:
         order_depth = state.order_depths[self.symbol]
         price = min(order_depth.buy_orders.keys())
         position = state.position.get(self.symbol, 0)
-        self.sell(price, self.limit + position)
+        to_sell = self.limit + position
+        self.sell(price, to_sell)
+
+    def close_position(self, state: TradingState, position: int) -> None:
+        order_depth = state.order_depths[self.symbol]
+        if position > 0:
+            # Sell to flatten
+            price = min(order_depth.buy_orders.keys())
+            self.sell(price, position)
+        elif position < 0:
+            # Buy to flatten
+            price = max(order_depth.sell_orders.keys())
+            self.buy(price, -position)
+
 
 
 
@@ -466,14 +484,14 @@ class Trader:
             "PICNIC_BASKET1": CombinedBasketStrategy(
                 "PICNIC_BASKET1", limits["PICNIC_BASKET1"],
                 {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
-                buy_z=0.8, sell_z=1.0,
-                mean=48.76, std=85.91  # Replace with your real Basket 1 stats
+                buy_z=.7, sell_z=.7, exit_z=.2,
+                mean=48.76, std=85.91
             ),
             "PICNIC_BASKET2": CombinedBasketStrategy(
-            "PICNIC_BASKET2", limits["PICNIC_BASKET2"],
-            {"CROISSANTS": 4, "JAMS": 2},
-            buy_z=2.2, sell_z=0.9,
-            mean=30.24, std=59.85  # Replace with your real Basket 2 stats
+                "PICNIC_BASKET2", limits["PICNIC_BASKET2"],
+                {"CROISSANTS": 4, "JAMS": 2},
+                buy_z=2.2, sell_z=0.9, exit_z=0.1,
+                mean=30.24, std=59.85
             ),
         }
 
