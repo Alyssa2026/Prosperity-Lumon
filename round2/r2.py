@@ -393,11 +393,14 @@ class SquidInkStrategy(MarketMakingStrategy):
     
 
 class CombinedBasketStrategy(Strategy):
-            
-    def __init__(self, symbol, limit, components, threshold) -> None:
-        super().__init__(symbol, limit)  # Base class still needs a single limit
+    def __init__(self, symbol: str, limit: int, components: dict[str, int],
+                 buy_z: float, sell_z: float, mean: float, std: float) -> None:
+        super().__init__(symbol, limit)
         self.components = components
-        self.threshold = threshold
+        self.buy_z = buy_z
+        self.sell_z = sell_z
+        self.mean = mean
+        self.std = std
 
     def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
         order_depth = state.order_depths.get(symbol)
@@ -405,49 +408,38 @@ class CombinedBasketStrategy(Strategy):
             return None
         buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
         sell_orders = sorted(order_depth.sell_orders.items())
-        popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
-        popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
-        return (popular_buy_price + popular_sell_price) / 2
-    
+        return (buy_orders[0][0] + sell_orders[0][0]) / 2
+
     def act(self, state: TradingState) -> None:
-        
         mid_prices = {self.symbol: self.get_mid_price(state, self.symbol)}
-        
-        for symbol in self.components.keys():
-            if symbol in state.order_depths:
-                mid_prices[symbol] = self.get_mid_price(state, symbol)
-        
-        if not all(item in mid_prices for item in self.components):
+        for symbol in self.components:
+            mid_prices[symbol] = self.get_mid_price(state, symbol)
+
+        if any(p is None for p in mid_prices.values()):
             return
 
-        fair_value = sum(qty * mid_prices[item] for item, qty in self.components.items())
-        basket_market_price = mid_prices[self.symbol]
-        diff = basket_market_price - fair_value
-        lower, upper = self.threshold
+        fair_value = sum(qty * mid_prices[symbol] for symbol, qty in self.components.items())
+        market_price = mid_prices[self.symbol]
+        diff = market_price - fair_value
+        z = (diff - self.mean) / self.std if self.std != 0 else 0
 
-        if diff < lower:
-            self.go_long(state, self.limit)
-        elif diff > upper:
-            self.go_short(state, self.limit)
+        if z < -self.buy_z:
+            self.go_long(state)
+        elif z > self.sell_z:
+            self.go_short(state)
 
-
-    def go_long(self, state: TradingState, limit) -> None:
+    def go_long(self, state: TradingState) -> None:
         order_depth = state.order_depths[self.symbol]
         price = max(order_depth.sell_orders.keys())
-
         position = state.position.get(self.symbol, 0)
-        to_buy = limit - position
+        self.buy(price, self.limit - position)
 
-        self.buy(price, to_buy)
-
-    def go_short(self, state: TradingState, limit) -> None:
+    def go_short(self, state: TradingState) -> None:
         order_depth = state.order_depths[self.symbol]
         price = min(order_depth.buy_orders.keys())
-
         position = state.position.get(self.symbol, 0)
-        to_sell = limit + position
+        self.sell(price, self.limit + position)
 
-        self.sell(price, to_sell)
 
 
 
@@ -471,8 +463,18 @@ class Trader:
             "CROISSANTS": Strategy("CROISSANTS", limits["CROISSANTS"]),
             "JAMS": Strategy("JAMS", limits["JAMS"]),
             "DJEMBES": Strategy("DJEMBES", limits["DJEMBES"]),
-            "PICNIC_BASKET1": CombinedBasketStrategy("PICNIC_BASKET1", limits["PICNIC_BASKET1"], {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1}, (-40, 70)),
-            "PICNIC_BASKET2": CombinedBasketStrategy("PICNIC_BASKET2", limits["PICNIC_BASKET2"], {"CROISSANTS": 4, "JAMS": 2}, (-100, 60)),
+            "PICNIC_BASKET1": CombinedBasketStrategy(
+                "PICNIC_BASKET1", limits["PICNIC_BASKET1"],
+                {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
+                buy_z=2.0, sell_z=1.0,
+                mean=48.76, std=85.91  # Replace with your real Basket 1 stats
+            ),
+            "PICNIC_BASKET2": CombinedBasketStrategy(
+            "PICNIC_BASKET2", limits["PICNIC_BASKET2"],
+            {"CROISSANTS": 4, "JAMS": 2},
+            buy_z=2.2, sell_z=0.9,
+            mean=30.24, std=59.85  # Replace with your real Basket 2 stats
+            ),
         }
 
 
