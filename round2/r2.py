@@ -253,143 +253,65 @@ class RainforestResinStrategy(MarketMakingStrategy):
     def get_true_value(self, state: TradingState) -> int:
         return 10_000
 
-class SquidInkStrategy(MarketMakingStrategy):
+class SquidInkStrategy(Strategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
-        self.price_window = deque(maxlen=3)
-        self.window = deque(maxlen=5)  # Track how long we've been at position limits
-        self.window_size = 5  # Define window size for position limit tracking
-    
-    def get_true_value(self, state: TradingState) -> int:
-        order_depth = state.order_depths[self.symbol]
+        self.buy_z = .4
+        self.sell_z = .4
+        self.mean = 1924.95084375
+        self.std = 70.23916397594667
+        self.max_z = 3 # used for scaling aggressiveness
+
+    def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
+        order_depth = state.order_depths.get(symbol)
+        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+            return None
         buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
         sell_orders = sorted(order_depth.sell_orders.items())
+        return (buy_orders[0][0] + sell_orders[0][0]) / 2
 
-        # Handle empty order book case
-        if not buy_orders or not sell_orders:
-            return state.mid_price.get(self.symbol, 0)
-            
-        popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
-        popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
-
-        return round((popular_buy_price + popular_sell_price) / 2)
-    
     def act(self, state: TradingState) -> None:
-        true_value = self.get_true_value(state)
-        
-        # Add to price window for Bollinger Band calculation
-        self.price_window.append(true_value)
-        if len(self.price_window) < self.price_window.maxlen:
-            return  # Wait until we have enough data
-            
-        order_depth = state.order_depths[self.symbol]
-        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
-        sell_orders = sorted(order_depth.sell_orders.items())
-        
-        position = state.position.get(self.symbol, 0)
-        remaining_buy_capacity = self.limit - position
-        remaining_sell_capacity = self.limit + position
-        
-        # Track position limit status
-        at_position_limit = abs(position) >= self.limit * 0.9 # Consider close to limit
-        self.window.append(at_position_limit)
-        
-        # Calculate liquidation signals
-        soft_liquidate = len(self.window) == self.window_size and sum(self.window) >= self.window_size / 2
-        hard_liquidate = len(self.window) == self.window_size and all(self.window)
-        
-        # Calculate Bollinger Bands
-        mean = statistics.mean(self.price_window)
-        std = statistics.stdev(self.price_window)
-        
-        # Adjust band width based on volatility
-        band_width = 1.5  # Start with standard width
-        if std > 10:  # High volatility
-            band_width = 2.0  # Widen bands
-        
-        upper_band = mean + band_width * std
-        lower_band = mean - band_width * std
-        
-        # Calculate a position target based on band position
-        # When price is high (above upper band), we want to be short
-        # When price is low (below lower band), we want to be long
-        # When price is in band, we want to be neutral or reducing positions
-        
-        target_position = 0
-        
-        if true_value > upper_band:
-            # Bearish - want to be short
-            band_position = (true_value - upper_band) / std
-            target_position = max(-self.limit, int(-self.limit * min(1.0, band_position)))
-        elif true_value < lower_band:
-            # Bullish - want to be long
-            band_position = (lower_band - true_value) / std
-            target_position = min(self.limit, int(self.limit * min(1.0, band_position)))
-            
-        # Adjust target based on liquidation signals
-        if hard_liquidate:
-            target_position = 0  # Force to neutral
-        elif soft_liquidate:
-            target_position = int(target_position * 0.5)  # Reduce target
-            
-        # Calculate target order size
-        order_size = target_position - position
-        
-        # Execute trades
-        if order_size > 0:  # Need to buy
-            # Fill existing sell orders at favorable prices
-            for price, volume in sell_orders:
-                if remaining_buy_capacity <= 0 or order_size <= 0:
-                    break
-                    
-                # Only buy if price is reasonable
-                if price <= true_value - (0.5 * std) or price <= lower_band:
-                    quantity = min(remaining_buy_capacity, -volume, order_size)
-                    if quantity > 0:
-                        self.buy(price, quantity)
-                        remaining_buy_capacity -= quantity
-                        order_size -= quantity
-            
-            # Place new buy orders at aggressive price if still needed
-            if order_size > 0 and remaining_buy_capacity > 0:
-                # More aggressive when price is below lower band
-                price_offset = 1 if true_value >= lower_band else 2
-                price = true_value - price_offset
-                self.buy(price, min(order_size, remaining_buy_capacity))
-                
-        elif order_size < 0:  # Need to sell
-            order_size = abs(order_size)
-            
-            # Fill existing buy orders at favorable prices
-            for price, volume in buy_orders:
-                if remaining_sell_capacity <= 0 or order_size <= 0:
-                    break
-                    
-                # Only sell if price is reasonable
-                if price >= true_value + (0.5 * std) or price >= upper_band:
-                    quantity = min(remaining_sell_capacity, volume, order_size)
-                    if quantity > 0:
-                        self.sell(price, quantity)
-                        remaining_sell_capacity -= quantity
-                        order_size -= quantity
-            
-            # Place new sell orders at aggressive price if still needed
-            if order_size > 0 and remaining_sell_capacity > 0:
-                # More aggressive when price is above upper band
-                price_offset = 1 if true_value <= upper_band else 2
-                price = true_value + price_offset
-                self.sell(price, min(order_size, remaining_sell_capacity))
+        mid_price = self.get_mid_price(state, self.symbol)
+        if mid_price is None:
+            return
 
-        # Always provide some liquidity regardless of position
-        if remaining_buy_capacity > 0:
-            # Place limit orders slightly below market
-            bid_price = true_value - 3 if at_position_limit else true_value - 1
-            self.buy(bid_price, remaining_buy_capacity // 4)
+        diff = mid_price - self.mean
+        z = (diff) / self.std if self.std != 0 else 0
+
+        if z < -self.buy_z:
+            self.go_long(state, z)
+        elif z > self.sell_z:
+            self.go_short(state, z)
+
+    def scale_quantity(self, z: float) -> int:
+        # Cap the z-score to avoid over-scaling
+        abs_z = min(abs(z), self.max_z)
+        # Linear scaling between 0 and 1
+        scale = abs_z / self.max_z #
+        return int(self.limit * scale)
+
+    def go_long(self, state: TradingState, z: float) -> None:
+        order_depth = state.order_depths[self.symbol]
+        if not order_depth.sell_orders:
+            return
+        price = max(order_depth.sell_orders.keys())
+        position = state.position.get(self.symbol, 0)
+        newLimit = self.scale_quantity(z) # 1/3* limit
+        quantity = min(newLimit-position, self.limit - position)
+        if quantity > 0:
+            self.buy(price, quantity)
             
-        if remaining_sell_capacity > 0:
-            # Place limit orders slightly above market
-            ask_price = true_value + 3 if at_position_limit else true_value + 1
-            self.sell(ask_price, remaining_sell_capacity // 4)
+    def go_short(self, state: TradingState, z: float) -> None:
+        order_depth = state.order_depths[self.symbol]
+        if not order_depth.buy_orders:
+            return
+        price = min(order_depth.buy_orders.keys())
+        position = state.position.get(self.symbol, 0)
+        newLimit = self.scale_quantity(z) # 1/3* limit
+
+        quantity = min(newLimit+position, self.limit + position)
+        if quantity > 0:
+            self.sell(price, quantity)
     
 
 class CombinedBasketStrategy(Strategy):
@@ -552,7 +474,75 @@ class PairsMarketMakingStrategy(Strategy):
 
     def load(self, data: JSON) -> None:
         pass
+    
+class DjembeRatioArbitrageStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int) -> None:
+        super().__init__(symbol, limit)
+        self.symbol_pb = "PICNIC_BASKET1"
+        self.mean_ratio = 0.227537
+        self.std_ratio = 0.000907
+        self.entry_z = 0.48
+        self.exit_z = 0.133
 
+    def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
+        order_depth = state.order_depths.get(symbol)
+        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+            return None
+        best_bid = max(order_depth.buy_orders)
+        best_ask = min(order_depth.sell_orders)
+        return (best_bid + best_ask) / 2
+
+    def act(self, state: TradingState) -> None:
+        dj_price = self.get_mid_price(state, self.symbol)
+        pb_price = self.get_mid_price(state, self.symbol_pb)
+        if dj_price is None or pb_price is None:
+            return
+
+        ratio = dj_price / pb_price
+        z = (ratio - self.mean_ratio) / self.std_ratio if self.std_ratio != 0 else 0
+
+        position = state.position.get(self.symbol, 0)
+        order_depth = state.order_depths[self.symbol]
+
+        if z > self.entry_z and position > -self.limit:
+            # DJEMBES too expensive: Sell
+            to_sell = self.limit + position
+            for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                qty = min(volume, to_sell)
+                self.sell(price, qty)
+                to_sell -= qty
+                if to_sell <= 0:
+                    break
+
+        elif z < -self.entry_z and position < self.limit:
+            # DJEMBES too cheap: Buy
+            to_buy = self.limit - position
+            for price, volume in sorted(order_depth.sell_orders.items()):
+                qty = min(-volume, to_buy)
+                self.buy(price, qty)
+                to_buy -= qty
+                if to_buy <= 0:
+                    break
+
+        elif abs(z) < self.exit_z and position != 0:
+            # Exit trade
+            if position > 0:
+                for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                    qty = min(volume, position)
+                    self.sell(price, qty)
+                    position -= qty
+                    if position <= 0:
+                        break
+            elif position < 0:
+                for price, volume in sorted(order_depth.sell_orders.items()):
+                    qty = min(-volume, -position)
+                    self.buy(price, qty)
+                    position += qty
+                    if position >= 0:
+                        break
+
+
+                
 # Modified Trader that integrates the pairs strategy.
 class Trader:
     def __init__(self) -> None:
@@ -566,13 +556,14 @@ class Trader:
             "PICNIC_BASKET1": 60,
             "PICNIC_BASKET2": 100,
         }
+        
         # Store individual strategies and, for croissants and jam, a combined pairs strategy.
         # Note: Remove the separate "CROISSANTS" and "JAMS" strategies since they are handled as a pair.
         self.strategies = {
             "KELP": KelpStrategy("KELP", limits["KELP"]),
             "RAINFOREST_RESIN": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"]),
             "SQUID_INK": SquidInkStrategy("SQUID_INK", limits["SQUID_INK"]),
-            "DJEMBES": Strategy("DJEMBES", limits["DJEMBES"]),
+            "DJEMBES": DjembeRatioArbitrageStrategy("DJEMBES", limits["DJEMBES"]),
             "PICNIC_BASKET1": CombinedBasketStrategy(
                 "PICNIC_BASKET1", limits["PICNIC_BASKET1"],
                 {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
@@ -589,9 +580,9 @@ class Trader:
             "CROISSANTS", "JAMS",
             limits["CROISSANTS"],
             limits["JAMS"],
-            buy_threshold=1,        # Increase threshold if data indicates a larger move is required.
+            buy_threshold=.6,        # Increase threshold if data indicates a larger move is required.
             sell_threshold=1,       # Likewise for the sell threshold.
-            exit_threshold=0.25,      # Adjust exit threshold to match reversion characteristics.
+            exit_threshold=0.15,      # Adjust exit threshold to match reversion characteristics.
             mean=0.6519  ,          # Update to reflect the historical mean ratio.
             std=0.0032  ,       # Update to reflect the measured standard deviation.
             order_size=20         # Adjust order size based on trade frequency and liquidity.
