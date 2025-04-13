@@ -2,76 +2,61 @@ import sympy as sp
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Define the symbolic variable
-x = sp.Symbol('x', real=True)
+# Symbols for symbolic computation
+b1, b2 = sp.symbols('b1 b2', real=True)
 
-# Total density factor for the uniform distribution over a total range of 110.
-density = 1/110
+# Uniform density over total valid domain [160–200] ∪ [250–320] => range = 40 + 70 = 110
+density = 1 / 110
 
-# Define expected profit functions for the two allowed regions
-# Region 1: bidOne in [160, 200]
-E1 = (320 - x) * (x - 160) * density
+# For [160, 200]
+E1 = ((b1 - 160) * (320 - b1) + (b2 - b1) * (320 - b2)) * density
 
-# Region 2: bidOne in [250, 320]
-E2 = (320 - x) * (x - 250) * density
+# For [250, 320]
+E2 = ((b1 - 250) * (320 - b1) + (b2 - b1) * (320 - b2)) * density
 
-# Compute derivatives for each region
-dE1 = sp.diff(E1, x)
-dE2 = sp.diff(E2, x)
+# Discretize search for bid pairs
+def evaluate_region(region_start, region_end, expr):
+    results = []
+    for b1_val in np.linspace(region_start, region_end - 1, 50):
+        for b2_val in np.linspace(b1_val + 1, region_end, 50):
+            profit = expr.subs({b1: b1_val, b2: b2_val})
+            results.append(((b1_val, b2_val), float(profit)))
+    return results
 
-# Find critical points for each region and filter those within the interval
-crit_points_E1 = [pt for pt in sp.solve(dE1, x) if pt >= 160 and pt <= 200]
-crit_points_E2 = [pt for pt in sp.solve(dE2, x) if pt >= 250 and pt <= 320]
-# print(crit_points_E1, crit_points_E2)
-# Prepare candidate bids: include boundaries and interior critical points
-candidates = [160, 200, 250, 320]
-candidates.extend(crit_points_E1)
-candidates.extend(crit_points_E2)
+# Evaluate both regions
+results_region1 = evaluate_region(160, 200, E1)
+results_region2 = evaluate_region(250, 320, E2)
 
-# Evaluate the expected profit for each candidate
-results = []
-for candidate in candidates:
-    candidate = sp.N(candidate)  # numerical value
-    if 160 <= candidate <= 200:
-        profit_val = E1.subs(x, candidate)
-    elif 250 <= candidate <= 320:
-        profit_val = E2.subs(x, candidate)
-    results.append((candidate, sp.N(profit_val)))
+# Combine results and find maximum
+all_results = results_region1 + results_region2
+optimal_pair, max_profit = max(all_results, key=lambda item: item[1])
 
-# Print out each candidate bid and its expected profit
-print("Candidate bids and their expected profit:")
-for bid_val, profit_val in results:
-    print(f"  BidOne = {bid_val:.2f}, Expected Profit = {profit_val:.2f}")
+print("Optimal Bid Pair (Two-Bid Strategy):")
+print(f"  BidOne = {optimal_pair[0]:.2f}, BidTwo = {optimal_pair[1]:.2f}")
+print(f"  Expected Profit = {max_profit:.2f} SeaShells")
 
-# Find the candidate with the maximum expected profit
-optimal_bid, max_profit = max(results, key=lambda item: item[1])
+# Visualization for one region (optional)
+from mpl_toolkits.mplot3d import Axes3D
 
-print("\nOptimal BidOne:")
-print(f"  BidOne = {optimal_bid:.2f} SeaShells, yielding an expected profit of {max_profit:.2f} SeaShells")
+fig = plt.figure(figsize=(12, 6))
+ax = fig.add_subplot(111, projection='3d')
 
-# Now, create a graph of the expected profit functions across the two regions.
-# Generate data for region [160, 200]
-x_vals_E1 = np.linspace(160, 200, 300)
-E1_func = sp.lambdify(x, E1, 'numpy')
-y_vals_E1 = E1_func(x_vals_E1)
+r1_vals = np.linspace(250, 319, 40)
+r2_vals = np.linspace(251, 320, 40)
+R1, R2 = np.meshgrid(r1_vals, r2_vals)
+Z = np.zeros_like(R1)
 
-# Generate data for region [250, 320]
-x_vals_E2 = np.linspace(250, 320, 300)
-E2_func = sp.lambdify(x, E2, 'numpy')
-y_vals_E2 = E2_func(x_vals_E2)
+for i in range(R1.shape[0]):
+    for j in range(R1.shape[1]):
+        if R2[i, j] > R1[i, j]:
+            Z[i, j] = float(E2.subs({b1: R1[i, j], b2: R2[i, j]}))
+        else:
+            Z[i, j] = np.nan
 
-plt.figure(figsize=(10, 6))
-plt.plot(x_vals_E1, y_vals_E1, label='Expected Profit for Region [160, 200]')
-plt.plot(x_vals_E2, y_vals_E2, label='Expected Profit for Region [250, 320]')
-
-# Mark the optimal candidate with a red dot.
-plt.scatter([optimal_bid], [max_profit], color='red', zorder=5, 
-            label=f'Optimal Bid ({optimal_bid:.2f})')
-
-plt.xlabel('bidOne (SeaShells)')
-plt.ylabel('Expected Profit (SeaShells)')
-plt.title('Expected Profit vs. bidOne')
-plt.legend()
-plt.grid(True)
+ax.plot_surface(R1, R2, Z, cmap='plasma')
+ax.set_xlabel('BidOne (b1)')
+ax.set_ylabel('BidTwo (b2)')
+ax.set_zlabel('Expected Profit')
+ax.set_title('Expected Profit Surface for Region [250, 320]')
 plt.tight_layout()
 plt.show()
