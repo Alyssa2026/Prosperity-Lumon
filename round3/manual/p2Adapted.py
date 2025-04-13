@@ -1,62 +1,62 @@
-import sympy as sp
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Symbols for symbolic computation
-b1, b2 = sp.symbols('b1 b2', real=True)
-
-# Uniform density over total valid domain [160–200] ∪ [250–320] => range = 40 + 70 = 110
+# Density of the segmented uniform distribution
 density = 1 / 110
 
-# For [160, 200]
-E1 = ((b1 - 160) * (320 - b1) + (b2 - b1) * (320 - b2)) * density
+# Compute cumulative probability from the custom CDF
+def cumulative_prob(lower, upper, b1, b2):
+    # Probabilities in each segment
+    prob = 0.0
+    if b1 < upper and b2 > lower:
+        clipped_b1 = max(b1, lower)
+        clipped_b2 = min(b2, upper)
+        prob = max(0, clipped_b2 - clipped_b1)
+    return prob * density
 
-# For [250, 320]
-E2 = ((b1 - 250) * (320 - b1) + (b2 - b1) * (320 - b2)) * density
+# Expected profit function
+def expected_profit(b1, b2):
+    if b2 <= b1:
+        return 0
 
-# Discretize search for bid pairs
-def evaluate_region(region_start, region_end, expr):
-    results = []
-    for b1_val in np.linspace(region_start, region_end - 1, 50):
-        for b2_val in np.linspace(b1_val + 1, region_end, 50):
-            profit = expr.subs({b1: b1_val, b2: b2_val})
-            results.append(((b1_val, b2_val), float(profit)))
-    return results
+    # Part 1: reserve <= b1
+    p1 = cumulative_prob(160, 200, 160, b1) + cumulative_prob(250, 320, 250, b1)
+    profit1 = (320 - b1) * p1
 
-# Evaluate both regions
-results_region1 = evaluate_region(160, 200, E1)
-results_region2 = evaluate_region(250, 320, E2)
+    # Part 2: b1 < reserve <= b2
+    p2 = cumulative_prob(160, 200, b1, b2) + cumulative_prob(250, 320, b1, b2)
+    profit2 = (320 - b2) * p2
 
-# Combine results and find maximum
-all_results = results_region1 + results_region2
-optimal_pair, max_profit = max(all_results, key=lambda item: item[1])
+    return profit1 + profit2
 
-print("Optimal Bid Pair (Two-Bid Strategy):")
-print(f"  BidOne = {optimal_pair[0]:.2f}, BidTwo = {optimal_pair[1]:.2f}")
-print(f"  Expected Profit = {max_profit:.2f} SeaShells")
+# Create grid of bid pairs
+b1_vals = np.linspace(160, 319, 80)
+b2_vals = np.linspace(161, 320, 80)
+B1, B2 = np.meshgrid(b1_vals, b2_vals)
+Z = np.zeros_like(B1)
 
-# Visualization for one region (optional)
-from mpl_toolkits.mplot3d import Axes3D
+# Compute expected profits over the grid
+for i in range(len(b1_vals)):
+    for j in range(len(b2_vals)):
+        b1 = B1[j, i]
+        b2 = B2[j, i]
+        Z[j, i] = expected_profit(b1, b2)
 
+# Find optimal bid pair
+max_idx = np.unravel_index(np.argmax(Z), Z.shape)
+optimal_b1 = B1[max_idx]
+optimal_b2 = B2[max_idx]
+max_profit = Z[max_idx]
+
+print(f"Optimal BidOne = {optimal_b1:.2f}, BidTwo = {optimal_b2:.2f}, Expected Profit = {max_profit:.2f}")
+
+# Plotting
 fig = plt.figure(figsize=(12, 6))
 ax = fig.add_subplot(111, projection='3d')
-
-r1_vals = np.linspace(250, 319, 40)
-r2_vals = np.linspace(251, 320, 40)
-R1, R2 = np.meshgrid(r1_vals, r2_vals)
-Z = np.zeros_like(R1)
-
-for i in range(R1.shape[0]):
-    for j in range(R1.shape[1]):
-        if R2[i, j] > R1[i, j]:
-            Z[i, j] = float(E2.subs({b1: R1[i, j], b2: R2[i, j]}))
-        else:
-            Z[i, j] = np.nan
-
-ax.plot_surface(R1, R2, Z, cmap='plasma')
+ax.plot_surface(B1, B2, Z, cmap='viridis')
 ax.set_xlabel('BidOne (b1)')
 ax.set_ylabel('BidTwo (b2)')
 ax.set_zlabel('Expected Profit')
-ax.set_title('Expected Profit Surface for Region [250, 320]')
+ax.set_title('Expected Profit vs. (BidOne, BidTwo)')
 plt.tight_layout()
 plt.show()
