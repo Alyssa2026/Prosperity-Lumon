@@ -313,8 +313,6 @@ class SquidInkStrategy(Strategy):
         if quantity > 0:
             self.sell(price, quantity)
 
-
-
     
 
 class CombinedBasketStrategy(Strategy):
@@ -391,12 +389,12 @@ class Trader:
         limits = {
             "KELP": 0,
             "RAINFOREST_RESIN": 0, 
-            "SQUID_INK": 50,
-            "CROISSANTS": 0,
-            "JAMS": 0,
-            "DJEMBES": 0,
-            "PICNIC_BASKET1": 0, 
-            "PICNIC_BASKET2": 0, 
+            "SQUID_INK": 0,
+            "CROISSANTS": 250,
+            "JAMS": 350,
+            "DJEMBES": 60,
+            "PICNIC_BASKET1": 60, 
+            "PICNIC_BASKET2": 100, 
         }
 
         self.strategies = {
