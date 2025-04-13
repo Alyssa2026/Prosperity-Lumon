@@ -439,6 +439,7 @@ class CombinedBasketStrategy(Strategy):
         to_buy = self.limit - position
         self.buy(price, to_buy)
 
+
     def go_short(self, state: TradingState) -> None:
         order_depth = state.order_depths[self.symbol]
         price = min(order_depth.buy_orders.keys())
@@ -458,33 +459,124 @@ class CombinedBasketStrategy(Strategy):
             self.buy(price, -position)
 
 
+# This is the new pairs market making strategy.
+class PairsMarketMakingStrategy(Strategy):
+    def __init__(self, symbol1: str, symbol2: str, limit1: int, limit2: int,
+                buy_threshold: float, sell_threshold: float,
+                 exit_threshold: float, mean: float, std: float, order_size: int) -> None:
+        # Call the parent constructor with one of the symbols for reference.
+        super().__init__(symbol1, limit1)
+        self.symbol1 = symbol1
+        self.symbol2 = symbol2
+        self.limit1 = limit1
+        self.limit2 = limit2
+        self.buy_threshold = buy_threshold
+        self.sell_threshold = sell_threshold
+        self.exit_threshold = exit_threshold
+        self.mean = mean
+        self.std = std
+        self.order_size = order_size
+        # For the pair, orders will be stored in a dictionary mapping symbol -> list[Order]
+        self.orders = {}
 
+    def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
+        order_depth = state.order_depths.get(symbol)
+        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+            return None
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        return (best_bid + best_ask) / 2
 
+    # Overridden buy/sell methods that accept a symbol
+    def buy(self, symbol: str, price: int, quantity: int) -> None:
+        if symbol not in self.orders:
+            self.orders[symbol] = []
+        self.orders[symbol].append(Order(symbol, price, quantity))
 
+    def sell(self, symbol: str, price: int, quantity: int) -> None:
+        if symbol not in self.orders:
+            self.orders[symbol] = []
+        self.orders[symbol].append(Order(symbol, price, -quantity))
+
+    def act(self, state: TradingState) -> None:
+        mid1 = self.get_mid_price(state, self.symbol1)
+        mid2 = self.get_mid_price(state, self.symbol2)
+        if mid1 is None or mid2 is None:
+            return
+        # Calculate the current ratio between the two assets.
+        current_ratio = mid1 / mid2
+        z = (current_ratio - self.mean) / self.std if self.std != 0 else 0
+
+        pos1 = state.position.get(self.symbol1, 0)
+        pos2 = state.position.get(self.symbol2, 0)
+
+        # If the ratio is high, symbol1 may be overvalued relative to symbol2;
+        # sell symbol1 while buying symbol2.
+        if z > self.sell_threshold:
+            sell_price_sym1 = max(state.order_depths[self.symbol1].buy_orders.keys())
+            buy_price_sym2 = min(state.order_depths[self.symbol2].sell_orders.keys())
+            if pos1 > -self.limit1 and pos2 < self.limit2:
+                self.sell(self.symbol1, sell_price_sym1, self.order_size)
+                self.buy(self.symbol2, buy_price_sym2, self.order_size)
+        # If the ratio is low, symbol1 may be undervalued relative to symbol2;
+        # buy symbol1 while selling symbol2.
+        elif z < -self.buy_threshold:
+            buy_price_sym1 = min(state.order_depths[self.symbol1].sell_orders.keys())
+            sell_price_sym2 = max(state.order_depths[self.symbol2].buy_orders.keys())
+            if pos1 < self.limit1 and pos2 > -self.limit2:
+                self.buy(self.symbol1, buy_price_sym1, self.order_size)
+                self.sell(self.symbol2, sell_price_sym2, self.order_size)
+        # If the deviation has narrowed, close positions to lock in profit.
+        elif abs(z) < self.exit_threshold:
+            if pos1 > 0:
+                sell_price_sym1 = max(state.order_depths[self.symbol1].buy_orders.keys())
+                self.sell(self.symbol1, sell_price_sym1, pos1)
+            elif pos1 < 0:
+                buy_price_sym1 = min(state.order_depths[self.symbol1].sell_orders.keys())
+                self.buy(self.symbol1, buy_price_sym1, -pos1)
+            if pos2 > 0:
+                sell_price_sym2 = max(state.order_depths[self.symbol2].buy_orders.keys())
+                self.sell(self.symbol2, sell_price_sym2, pos2)
+            elif pos2 < 0:
+                buy_price_sym2 = min(state.order_depths[self.symbol2].sell_orders.keys())
+                self.buy(self.symbol2, buy_price_sym2, -pos2)
+
+    # We override run() so that it returns a dictionary mapping each symbol to its list of orders.
+    def run(self, state: TradingState) -> dict[str, list[Order]]:
+        self.orders = {}
+        self.act(state)
+        return self.orders
+
+    def save(self) -> JSON:
+        return {}
+
+    def load(self, data: JSON) -> None:
+        pass
+
+# Modified Trader that integrates the pairs strategy.
 class Trader:
     def __init__(self) -> None:
         limits = {
-            "KELP": 0,
-            "RAINFOREST_RESIN": 0, 
-            "SQUID_INK": 0,
+            "KELP": 50,
+            "RAINFOREST_RESIN": 50,
+            "SQUID_INK": 50,
             "CROISSANTS": 250,
             "JAMS": 350,
             "DJEMBES": 60,
-            "PICNIC_BASKET1": 60, 
-            "PICNIC_BASKET2": 100, 
+            "PICNIC_BASKET1": 60,
+            "PICNIC_BASKET2": 100,
         }
-
+        # Store individual strategies and, for croissants and jam, a combined pairs strategy.
+        # Note: Remove the separate "CROISSANTS" and "JAMS" strategies since they are handled as a pair.
         self.strategies = {
             "KELP": KelpStrategy("KELP", limits["KELP"]),
             "RAINFOREST_RESIN": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"]),
             "SQUID_INK": SquidInkStrategy("SQUID_INK", limits["SQUID_INK"]),
-            "CROISSANTS": Strategy("CROISSANTS", limits["CROISSANTS"]),
-            "JAMS": Strategy("JAMS", limits["JAMS"]),
             "DJEMBES": Strategy("DJEMBES", limits["DJEMBES"]),
             "PICNIC_BASKET1": CombinedBasketStrategy(
                 "PICNIC_BASKET1", limits["PICNIC_BASKET1"],
                 {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
-                buy_z=.7, sell_z=.7, exit_z=.2,
+                buy_z=0.7, sell_z=0.7, exit_z=0.2,
                 mean=48.76, std=85.91
             ),
             "PICNIC_BASKET2": CombinedBasketStrategy(
@@ -493,32 +585,39 @@ class Trader:
                 buy_z=2.2, sell_z=0.9, exit_z=0.1,
                 mean=30.24, std=59.85
             ),
+          "CROISSANTS_JAMS": PairsMarketMakingStrategy(
+            "CROISSANTS", "JAMS",
+            limits["CROISSANTS"],
+            limits["JAMS"],
+            buy_threshold=1,        # Increase threshold if data indicates a larger move is required.
+            sell_threshold=1,       # Likewise for the sell threshold.
+            exit_threshold=0.25,      # Adjust exit threshold to match reversion characteristics.
+            mean=0.6519  ,          # Update to reflect the historical mean ratio.
+            std=0.0032  ,       # Update to reflect the measured standard deviation.
+            order_size=20         # Adjust order size based on trade frequency and liquidity.
+        )
+
         }
 
-
-
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
-        """
-        Processes market orders and determines appropriate actions per strategy.
-        Uses KelpStrategy for KELP and OtherStrategy for all other symbols.
-        """
         logger.print(state.position)
-
         conversions = 0
+        # Use the strategy keys (not the raw state.order_depths) so that we include the pairs strategy.
         old_trader_data = json.loads(state.traderData) if state.traderData != "" else {}
         new_trader_data = {}
-
-        orders = {}
-        for symbol in state.order_depths:
-            strategy = self.strategies[symbol]
-
-            if symbol in old_trader_data:
-                strategy.load(old_trader_data.get(symbol, None))
-
-            orders[symbol] = strategy.run(state)
-            new_trader_data[symbol] = strategy.save()
-
+        orders: Dict[str, List[Order]] = {}
+        # Iterate over the strategies, load/save each strategy's persistent data,
+        # and merge orders. For strategies returning a list (single symbol) we use their symbol as key,
+        # and for strategies returning a dict (multi-symbol, e.g. pairs) we update the orders dict.
+        for key, strategy in self.strategies.items():
+            if key in old_trader_data:
+                strategy.load(old_trader_data.get(key, None))
+            result = strategy.run(state)
+            if isinstance(result, list):  # single-symbol strategy
+                orders[strategy.symbol] = result
+            elif isinstance(result, dict):  # multi-symbol strategy
+                orders.update(result)
+            new_trader_data[key] = strategy.save()
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
-
         logger.flush(state, orders, conversions, trader_data)
         return orders, conversions, trader_data
