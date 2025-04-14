@@ -167,6 +167,10 @@ class MarketMakingStrategy(Strategy):
         true_value = self.get_true_value(state)
 
         order_depth = state.order_depths[self.symbol]
+        # added more checking
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return
+        
         buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
         sell_orders = sorted(order_depth.sell_orders.items())
 
@@ -239,6 +243,8 @@ class KelpStrategy(MarketMakingStrategy):
     def get_true_value(self, state: TradingState) -> int:
         # added empty check
         order_depth = state.order_depths[self.symbol]
+        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+            return None
         
         buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
         sell_orders = sorted(order_depth.sell_orders.items())
@@ -425,43 +431,71 @@ class PairsMarketMakingStrategy(Strategy):
         mid2 = self.get_mid_price(state, self.symbol2)
         if mid1 is None or mid2 is None:
             return
-        # Calculate the current ratio between the two assets.
+
         current_ratio = mid1 / mid2
         z = (current_ratio - self.mean) / self.std if self.std != 0 else 0
 
         pos1 = state.position.get(self.symbol1, 0)
         pos2 = state.position.get(self.symbol2, 0)
 
-        # If the ratio is high, symbol1 may be overvalued relative to symbol2;
-        # sell symbol1 while buying symbol2.
+        # Cap-aware order size calculation
+        def cap_order(pos: int, limit: int, desired: int, side: str) -> int:
+            if side == "buy":
+                return max(0, min(desired, limit - pos))
+            elif side == "sell":
+                return max(0, min(desired, limit + pos))
+            return 0
+
         if z > self.sell_threshold:
-            sell_price_sym1 = max(state.order_depths[self.symbol1].buy_orders.keys())
-            buy_price_sym2 = min(state.order_depths[self.symbol2].sell_orders.keys())
-            if pos1 > -self.limit1 and pos2 < self.limit2:
-                self.sell(self.symbol1, sell_price_sym1, self.order_size)
-                self.buy(self.symbol2, buy_price_sym2, self.order_size)
-        # If the ratio is low, symbol1 may be undervalued relative to symbol2;
-        # buy symbol1 while selling symbol2.
+            # Overvalued: sell symbol1, buy symbol2
+            if self.symbol1 in state.order_depths and self.symbol2 in state.order_depths:
+                depth1 = state.order_depths[self.symbol1]
+                depth2 = state.order_depths[self.symbol2]
+
+                if depth1.buy_orders and depth2.sell_orders:
+                    price1 = max(depth1.buy_orders)
+                    price2 = min(depth2.sell_orders)
+
+                    qty1 = cap_order(pos1, self.limit1, self.order_size, "sell")
+                    qty2 = cap_order(pos2, self.limit2, self.order_size, "buy")
+                    size = min(qty1, qty2)
+                    if size > 0:
+                        self.sell(self.symbol1, price1, qty1)
+                        self.buy(self.symbol2, price2, qty2)
+
         elif z < -self.buy_threshold:
-            buy_price_sym1 = min(state.order_depths[self.symbol1].sell_orders.keys())
-            sell_price_sym2 = max(state.order_depths[self.symbol2].buy_orders.keys())
-            if pos1 < self.limit1 and pos2 > -self.limit2:
-                self.buy(self.symbol1, buy_price_sym1, self.order_size)
-                self.sell(self.symbol2, sell_price_sym2, self.order_size)
-        # If the deviation has narrowed, close positions to lock in profit.
+            # Undervalued: buy symbol1, sell symbol2
+            if self.symbol1 in state.order_depths and self.symbol2 in state.order_depths:
+                depth1 = state.order_depths[self.symbol1]
+                depth2 = state.order_depths[self.symbol2]
+
+                if depth1.sell_orders and depth2.buy_orders:
+                    price1 = min(depth1.sell_orders)
+                    price2 = max(depth2.buy_orders)
+
+                    qty1 = cap_order(pos1, self.limit1, self.order_size, "buy")
+                    qty2 = cap_order(pos2, self.limit2, self.order_size, "sell")
+                    size = min(qty1, qty2)
+                    if size > 0:
+                        self.buy(self.symbol1, price1, qty1)
+                        self.sell(self.symbol2, price2, qty2)
+
         elif abs(z) < self.exit_threshold:
+            # Mean reversion: close positions
             if pos1 > 0:
-                sell_price_sym1 = max(state.order_depths[self.symbol1].buy_orders.keys())
-                self.sell(self.symbol1, sell_price_sym1, pos1)
+                price1 = max(state.order_depths[self.symbol1].buy_orders, default=0)
+                self.sell(self.symbol1, price1, pos1)
             elif pos1 < 0:
-                buy_price_sym1 = min(state.order_depths[self.symbol1].sell_orders.keys())
-                self.buy(self.symbol1, buy_price_sym1, -pos1)
+                price1 = min(state.order_depths[self.symbol1].sell_orders, default=999999)
+                self.buy(self.symbol1, price1, -pos1)
+
             if pos2 > 0:
-                sell_price_sym2 = max(state.order_depths[self.symbol2].buy_orders.keys())
-                self.sell(self.symbol2, sell_price_sym2, pos2)
+                price2 = max(state.order_depths[self.symbol2].buy_orders, default=0)
+                self.sell(self.symbol2, price2, pos2)
             elif pos2 < 0:
-                buy_price_sym2 = min(state.order_depths[self.symbol2].sell_orders.keys())
-                self.buy(self.symbol2, buy_price_sym2, -pos2)
+                price2 = min(state.order_depths[self.symbol2].sell_orders, default=999999)
+                self.buy(self.symbol2, price2, -pos2)
+
 
     # We override run() so that it returns a dictionary mapping each symbol to its list of orders.
     def run(self, state: TradingState) -> dict[str, list[Order]]:
@@ -565,15 +599,37 @@ class VolcanicVoucherStrategy(Strategy):
 # Modified Trader that integrates the pairs strategy.
 class Trader:
     def __init__(self) -> None:
+        # limits = {
+        #     "KELP": 50,
+        #     "RAINFOREST_RESIN": 50,
+        #     "SQUID_INK": 50,
+        #     "CROISSANTS": 250,
+        #     "JAMS": 350,
+        #     "DJEMBES": 60,
+        #     "PICNIC_BASKET1": 60,
+        #     "PICNIC_BASKET2": 100,
+        #     "VOLCANIC_ROCK": 400,
+        #     "VOLCANIC_ROCK_VOUCHER_9500": 200,
+        #     "VOLCANIC_ROCK_VOUCHER_9750": 200,
+        #     "VOLCANIC_ROCK_VOUCHER_10000": 200,
+        #     "VOLCANIC_ROCK_VOUCHER_10250": 200,
+        #     "VOLCANIC_ROCK_VOUCHER_10500": 200,
+        # }
         limits = {
-            "KELP": 50,
-            "RAINFOREST_RESIN": 50,
-            "SQUID_INK": 50,
+            "KELP": 0,
+            "RAINFOREST_RESIN": 0,
+            "SQUID_INK": 0,
             "CROISSANTS": 250,
             "JAMS": 350,
-            "DJEMBES": 60,
-            "PICNIC_BASKET1": 60,
-            "PICNIC_BASKET2": 100,
+            "DJEMBES": 0,
+            "PICNIC_BASKET1": 0,
+            "PICNIC_BASKET2": 0,
+            "VOLCANIC_ROCK": 0,
+            "VOLCANIC_ROCK_VOUCHER_9500": 0,
+            "VOLCANIC_ROCK_VOUCHER_9750": 0,
+            "VOLCANIC_ROCK_VOUCHER_10000": 0,
+            "VOLCANIC_ROCK_VOUCHER_10250": 0,
+            "VOLCANIC_ROCK_VOUCHER_10500": 0,
         }
         
         # Store individual strategies and, for croissants and jam, a combined pairs strategy.
@@ -606,7 +662,7 @@ class Trader:
             std=0.0032  ,       # Update to reflect the measured standard deviation.
             order_size=20         # Adjust order size based on trade frequency and liquidity.
         ), 
-        "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9500", 200, 9500, 7),
+        "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9500", 200, 9500, 7), # clean up later
         "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9750", 200, 9750, 7),
         "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10000", 200, 10000, 7),
         "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10250", 200, 10250, 7),
