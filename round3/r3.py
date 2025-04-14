@@ -482,20 +482,22 @@ class PairsMarketMakingStrategy(Strategy):
 
         elif abs(z) < self.exit_threshold:
             # Mean reversion: close positions
-            if pos1 > 0:
-                price1 = max(state.order_depths[self.symbol1].buy_orders, default=0)
+            depth1 = state.order_depths.get(self.symbol1)
+            depth2 = state.order_depths.get(self.symbol2)
+
+            if pos1 > 0 and depth1 and depth1.buy_orders:
+                price1 = max(depth1.buy_orders)
                 self.sell(self.symbol1, price1, pos1)
-            elif pos1 < 0:
-                price1 = min(state.order_depths[self.symbol1].sell_orders, default=999999)
+            elif pos1 < 0 and depth1 and depth1.sell_orders:
+                price1 = min(depth1.sell_orders)
                 self.buy(self.symbol1, price1, -pos1)
 
-            if pos2 > 0:
-                price2 = max(state.order_depths[self.symbol2].buy_orders, default=0)
+            if pos2 > 0 and depth2 and depth2.buy_orders:
+                price2 = max(depth2.buy_orders)
                 self.sell(self.symbol2, price2, pos2)
-            elif pos2 < 0:
-                price2 = min(state.order_depths[self.symbol2].sell_orders, default=999999)
+            elif pos2 < 0 and depth2 and depth2.sell_orders:
+                price2 = min(depth2.sell_orders)
                 self.buy(self.symbol2, price2, -pos2)
-
 
     # We override run() so that it returns a dictionary mapping each symbol to its list of orders.
     def run(self, state: TradingState) -> dict[str, list[Order]]:
@@ -537,6 +539,9 @@ class DjembeRatioArbitrageStrategy(Strategy):
 
         position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
+         # added more checking
+        if not order_depth:
+            return
 
         if z > self.entry_z and position > -self.limit:
             # DJEMBES too expensive: Sell
@@ -599,38 +604,38 @@ class VolcanicVoucherStrategy(Strategy):
 # Modified Trader that integrates the pairs strategy.
 class Trader:
     def __init__(self) -> None:
-        # limits = {
-        #     "KELP": 50,
-        #     "RAINFOREST_RESIN": 50,
-        #     "SQUID_INK": 50,
-        #     "CROISSANTS": 250,
-        #     "JAMS": 350,
-        #     "DJEMBES": 60,
-        #     "PICNIC_BASKET1": 60,
-        #     "PICNIC_BASKET2": 100,
-        #     "VOLCANIC_ROCK": 400,
-        #     "VOLCANIC_ROCK_VOUCHER_9500": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_9750": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_10000": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_10250": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_10500": 200,
-        # }
         limits = {
-            "KELP": 0,
-            "RAINFOREST_RESIN": 0,
-            "SQUID_INK": 0,
+            "KELP": 50,
+            "RAINFOREST_RESIN": 50,
+            "SQUID_INK": 50,
             "CROISSANTS": 250,
             "JAMS": 350,
-            "DJEMBES": 0,
-            "PICNIC_BASKET1": 0,
-            "PICNIC_BASKET2": 0,
-            "VOLCANIC_ROCK": 0,
-            "VOLCANIC_ROCK_VOUCHER_9500": 0,
-            "VOLCANIC_ROCK_VOUCHER_9750": 0,
-            "VOLCANIC_ROCK_VOUCHER_10000": 0,
-            "VOLCANIC_ROCK_VOUCHER_10250": 0,
-            "VOLCANIC_ROCK_VOUCHER_10500": 0,
+            "DJEMBES": 60,
+            "PICNIC_BASKET1": 60,
+            "PICNIC_BASKET2": 100,
+            "VOLCANIC_ROCK": 400,
+            "VOLCANIC_ROCK_VOUCHER_9500": 200,
+            "VOLCANIC_ROCK_VOUCHER_9750": 200,
+            "VOLCANIC_ROCK_VOUCHER_10000": 200,
+            "VOLCANIC_ROCK_VOUCHER_10250": 200,
+            "VOLCANIC_ROCK_VOUCHER_10500": 200
         }
+        # limits = {
+        #     "KELP": 0,
+        #     "RAINFOREST_RESIN": 0,
+        #     "SQUID_INK": 0,
+        #     "CROISSANTS": 250,
+        #     "JAMS": 350,
+        #     "DJEMBES": 0,
+        #     "PICNIC_BASKET1": 0,
+        #     "PICNIC_BASKET2": 0,
+        #     "VOLCANIC_ROCK": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_9500": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_9750": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_10000": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_10250": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_10500": 0,
+        # }
         
         # Store individual strategies and, for croissants and jam, a combined pairs strategy.
         # Note: Remove the separate "CROISSANTS" and "JAMS" strategies since they are handled as a pair.
