@@ -458,10 +458,9 @@ class PairsMarketMakingStrategy(Strategy):
 
                     qty1 = cap_order(pos1, self.limit1, self.order_size, "sell")
                     qty2 = cap_order(pos2, self.limit2, self.order_size, "buy")
-                    size = min(qty1, qty2)
-                    if size > 0:
-                        self.sell(self.symbol1, price1, qty1)
-                        self.buy(self.symbol2, price2, qty2)
+                
+                    self.sell(self.symbol1, price1, qty1)
+                    self.buy(self.symbol2, price2, qty2)
 
         elif z < -self.buy_threshold:
             # Undervalued: buy symbol1, sell symbol2
@@ -475,10 +474,10 @@ class PairsMarketMakingStrategy(Strategy):
 
                     qty1 = cap_order(pos1, self.limit1, self.order_size, "buy")
                     qty2 = cap_order(pos2, self.limit2, self.order_size, "sell")
-                    size = min(qty1, qty2)
-                    if size > 0:
-                        self.buy(self.symbol1, price1, qty1)
-                        self.sell(self.symbol2, price2, qty2)
+
+                   
+                    self.buy(self.symbol1, price1, qty1)
+                    self.sell(self.symbol2, price2, qty2)
 
         elif abs(z) < self.exit_threshold:
             # Mean reversion: close positions
@@ -604,38 +603,38 @@ class VolcanicVoucherStrategy(Strategy):
 # Modified Trader that integrates the pairs strategy.
 class Trader:
     def __init__(self) -> None:
-        limits = {
-            "KELP": 50,
-            "RAINFOREST_RESIN": 50,
-            "SQUID_INK": 50,
-            "CROISSANTS": 250,
-            "JAMS": 350,
-            "DJEMBES": 60,
-            "PICNIC_BASKET1": 60,
-            "PICNIC_BASKET2": 100,
-            "VOLCANIC_ROCK": 400,
-            "VOLCANIC_ROCK_VOUCHER_9500": 200,
-            "VOLCANIC_ROCK_VOUCHER_9750": 200,
-            "VOLCANIC_ROCK_VOUCHER_10000": 200,
-            "VOLCANIC_ROCK_VOUCHER_10250": 200,
-            "VOLCANIC_ROCK_VOUCHER_10500": 200
-        }
         # limits = {
-        #     "KELP": 0,
-        #     "RAINFOREST_RESIN": 0,
-        #     "SQUID_INK": 0,
+        #     "KELP": 50,
+        #     "RAINFOREST_RESIN": 50,
+        #     "SQUID_INK": 50,
         #     "CROISSANTS": 250,
         #     "JAMS": 350,
-        #     "DJEMBES": 0,
-        #     "PICNIC_BASKET1": 0,
-        #     "PICNIC_BASKET2": 0,
-        #     "VOLCANIC_ROCK": 0,
-        #     "VOLCANIC_ROCK_VOUCHER_9500": 0,
-        #     "VOLCANIC_ROCK_VOUCHER_9750": 0,
-        #     "VOLCANIC_ROCK_VOUCHER_10000": 0,
-        #     "VOLCANIC_ROCK_VOUCHER_10250": 0,
-        #     "VOLCANIC_ROCK_VOUCHER_10500": 0,
+        #     "DJEMBES": 60,
+        #     "PICNIC_BASKET1": 60,
+        #     "PICNIC_BASKET2": 100,
+        #     "VOLCANIC_ROCK": 400,
+        #     "VOLCANIC_ROCK_VOUCHER_9500": 200,
+        #     "VOLCANIC_ROCK_VOUCHER_9750": 200,
+        #     "VOLCANIC_ROCK_VOUCHER_10000": 200,
+        #     "VOLCANIC_ROCK_VOUCHER_10250": 200,
+        #     "VOLCANIC_ROCK_VOUCHER_10500": 200
         # }
+        limits = {
+            "KELP": 0,
+            "RAINFOREST_RESIN": 0,
+            "SQUID_INK": 0,
+            "CROISSANTS": 250,
+            "JAMS": 350,
+            "DJEMBES": 0,
+            "PICNIC_BASKET1": 0,
+            "PICNIC_BASKET2": 0,
+            "VOLCANIC_ROCK": 0,
+            "VOLCANIC_ROCK_VOUCHER_9500": 0,
+            "VOLCANIC_ROCK_VOUCHER_9750": 0,
+            "VOLCANIC_ROCK_VOUCHER_10000": 0,
+            "VOLCANIC_ROCK_VOUCHER_10250": 0,
+            "VOLCANIC_ROCK_VOUCHER_10500": 0,
+        }
         
         # Store individual strategies and, for croissants and jam, a combined pairs strategy.
         # Note: Remove the separate "CROISSANTS" and "JAMS" strategies since they are handled as a pair.
@@ -660,7 +659,7 @@ class Trader:
             "CROISSANTS", "JAMS",
             limits["CROISSANTS"],
             limits["JAMS"],
-            buy_threshold=.6,        # Increase threshold if data indicates a larger move is required.
+            buy_threshold=.8,        # Increase threshold if data indicates a larger move is required.
             sell_threshold=1,       # Likewise for the sell threshold.
             exit_threshold=0.15,      # Adjust exit threshold to match reversion characteristics.
             mean=0.6519  ,          # Update to reflect the historical mean ratio.
