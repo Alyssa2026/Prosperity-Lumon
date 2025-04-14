@@ -19,8 +19,8 @@ def expected_profit(b1, b2, avg_b2):
     return (320 - b1) * p1 + scale * (320 - b2) * p2
 
 # Grid of values to search
-b1_vals = np.arange(160, 320, 2)
-b2_vals = np.arange(161, 321, 2)
+b1_vals =[200]
+b2_vals = np.arange(161, 321, 1)
 
 def solve(avg_b2):
     max_profit = float('-inf')
@@ -40,7 +40,7 @@ def solve(avg_b2):
     return maximizers, max_profit
 
 # Sweep over average bid values
-for avg_b2 in np.arange(270, 310.5, 0.5):
+for avg_b2 in np.arange(284, 310.5, 0.25):
     maximizers, max_profit = solve(avg_b2)
     if len(maximizers) > 1:
         print(f"avg_b2: {avg_b2:.1f}  Maximizers:", maximizers, f" Profit: {max_profit:.2f}")
