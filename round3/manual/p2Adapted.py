@@ -30,8 +30,8 @@ def expected_profit(b1, b2):
     return profit1 + profit2
 
 # Create grid of bid pairs
-b1_vals = np.linspace(160, 319, 80)
-b2_vals = np.linspace(161, 320, 80)
+b1_vals = np.linspace(160, 319, 100)
+b2_vals = np.linspace(161, 320, 100)
 B1, B2 = np.meshgrid(b1_vals, b2_vals)
 Z = np.zeros_like(B1)
 
