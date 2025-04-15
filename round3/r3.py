@@ -2,6 +2,8 @@ import json
 from abc import abstractmethod
 from collections import deque
 import statistics
+from math import log, sqrt, exp
+from statistics import NormalDist
 
 import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
@@ -9,6 +11,67 @@ from typing import Any, Dict, List, TypeAlias
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
+class BlackScholes:
+    @staticmethod
+    def black_scholes_call(spot, strike, time_to_expiry, volatility):
+        d1 = (
+            log(spot) - log(strike) + (0.5 * volatility * volatility) * time_to_expiry
+        ) / (volatility * sqrt(time_to_expiry))
+        d2 = d1 - volatility * sqrt(time_to_expiry)
+        call_price = spot * NormalDist().cdf(d1) - strike * NormalDist().cdf(d2)
+        return call_price
+
+    @staticmethod
+    def black_scholes_put(spot, strike, time_to_expiry, volatility):
+        d1 = (log(spot / strike) + (0.5 * volatility * volatility) * time_to_expiry) / (
+            volatility * sqrt(time_to_expiry)
+        )
+        d2 = d1 - volatility * sqrt(time_to_expiry)
+        put_price = strike * NormalDist().cdf(-d2) - spot * NormalDist().cdf(-d1)
+        return put_price
+
+    @staticmethod
+    def delta(spot, strike, time_to_expiry, volatility):
+        d1 = (
+            log(spot) - log(strike) + (0.5 * volatility * volatility) * time_to_expiry
+        ) / (volatility * sqrt(time_to_expiry))
+        return NormalDist().cdf(d1)
+
+    @staticmethod
+    def gamma(spot, strike, time_to_expiry, volatility):
+        d1 = (
+            log(spot) - log(strike) + (0.5 * volatility * volatility) * time_to_expiry
+        ) / (volatility * sqrt(time_to_expiry))
+        return NormalDist().pdf(d1) / (spot * volatility * sqrt(time_to_expiry))
+
+    @staticmethod
+    def vega(spot, strike, time_to_expiry, volatility):
+        d1 = (
+            log(spot) - log(strike) + (0.5 * volatility * volatility) * time_to_expiry
+        ) / (volatility * sqrt(time_to_expiry))
+        return NormalDist().pdf(d1) * (spot * sqrt(time_to_expiry)) / 100
+
+    @staticmethod
+    def implied_volatility(
+        call_price, spot, strike, time_to_expiry, max_iterations=200, tolerance=1e-10
+    ):
+        low_vol = 0.01
+        high_vol = 1.0
+        volatility = (low_vol + high_vol) / 2.0  # Initial guess as the midpoint
+        for _ in range(max_iterations):
+            estimated_price = BlackScholes.black_scholes_call(
+                spot, strike, time_to_expiry, volatility
+            )
+            diff = estimated_price - call_price
+            if abs(diff) < tolerance:
+                break
+            elif diff > 0:
+                high_vol = volatility
+            else:
+                low_vol = volatility
+            volatility = (low_vol + high_vol) / 2.0
+        return volatility
+    
 class Logger:
     def __init__(self) -> None:
         self.logs = ""
@@ -579,24 +642,87 @@ class DjembeRatioArbitrageStrategy(Strategy):
                     if position >= 0:
                         break
 class VolcanicVoucherStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int, strike_price: int, expiry_days: int) -> None:
+    def __init__(
+        self,
+        symbol: str,
+        limit: int,
+        strike_price: int,
+        expiry_days: int,
+        mean_iv: float = 0.159,
+        z_thresh: float = 5.0,
+        exit_z: float = 0.3,
+        std_window: int = 30,
+    ) -> None:
         super().__init__(symbol, limit)
         self.strike_price = strike_price
-        self.expiry_days = expiry_days  # Days remaining to expiry, can be updated per round
+        self.expiry_days = expiry_days
+        self.mean_iv = mean_iv
+        self.z_thresh = z_thresh
+        self.exit_z = exit_z
+        self.std_window = std_window
+        self.iv_record = {"past_iv": [], "prev_price": None}
 
     def act(self, state: TradingState) -> None:
-        # Placeholder logic for now
-        pass
+        order_depth = state.order_depths.get(self.symbol)
+        underlying_depth = state.order_depths.get("VOLCANIC_ROCK")
+        position = state.position.get(self.symbol, 0)
+
+        if not order_depth or not underlying_depth:
+            return
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return
+
+        best_bid = max(order_depth.buy_orders)
+        best_ask = min(order_depth.sell_orders)
+        voucher_price = (best_bid + best_ask) / 2
+
+        rock_bid = max(underlying_depth.buy_orders)
+        rock_ask = min(underlying_depth.sell_orders)
+        rock_price = (rock_bid + rock_ask) / 2
+
+        true_day = state.timestamp // 1_000_000 + 3
+        within_day = (state.timestamp % 1_000_000) / 1_000_000
+        tte = (8 - true_day - within_day) / 250
+        if tte <= 0:
+            return
+
+        # Only recompute IV if price changed
+        if self.iv_record["prev_price"] != voucher_price:
+            iv = BlackScholes.implied_volatility(
+                voucher_price, rock_price, self.strike_price, tte
+            )
+            if iv is not None:
+                self.iv_record["prev_price"] = voucher_price
+                self.iv_record["past_iv"].append(iv)
+                if len(self.iv_record["past_iv"]) > self.std_window:
+                    self.iv_record["past_iv"].pop(0)
+
+        if len(self.iv_record["past_iv"]) < self.std_window:
+            return
+
+        current_iv = self.iv_record["past_iv"][-1]
+        std_iv = np.std(self.iv_record["past_iv"])
+        z = (current_iv - self.mean_iv) / std_iv if std_iv > 0 else 0
+
+        # Execute strategy
+        if z > self.z_thresh and position > -self.limit:
+            self.sell(best_bid, self.limit + position)
+        elif z < -self.z_thresh and position < self.limit:
+            self.buy(best_ask, self.limit - position)
+        elif abs(z) < self.exit_z and position != 0:
+            if position > 0:
+                self.sell(best_bid, position)
+            else:
+                self.buy(best_ask, -position)
 
     def save(self) -> JSON:
-        return {
-            "strike_price": self.strike_price,
-            "expiry_days": self.expiry_days
-        }
+        return self.iv_record
 
     def load(self, data: JSON) -> None:
-        self.strike_price = data.get("strike_price", self.strike_price)
-        self.expiry_days = data.get("expiry_days", self.expiry_days)
+        if isinstance(data, dict):
+            self.iv_record = data
+
+
 
 
                 
@@ -623,13 +749,13 @@ class Trader:
             "KELP": 0,
             "RAINFOREST_RESIN": 0,
             "SQUID_INK": 0,
-            "CROISSANTS": 250,
-            "JAMS": 350,
+            "CROISSANTS": 0,
+            "JAMS": 0,
             "DJEMBES": 0,
             "PICNIC_BASKET1": 0,
             "PICNIC_BASKET2": 0,
             "VOLCANIC_ROCK": 0,
-            "VOLCANIC_ROCK_VOUCHER_9500": 0,
+            "VOLCANIC_ROCK_VOUCHER_9500": 200,
             "VOLCANIC_ROCK_VOUCHER_9750": 0,
             "VOLCANIC_ROCK_VOUCHER_10000": 0,
             "VOLCANIC_ROCK_VOUCHER_10250": 0,
@@ -665,12 +791,59 @@ class Trader:
             mean=0.6519  ,          # Update to reflect the historical mean ratio.
             std=0.0032  ,       # Update to reflect the measured standard deviation.
             order_size=20         # Adjust order size based on trade frequency and liquidity.
-        ), 
-        "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9500", 200, 9500, 7), # clean up later
-        "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9750", 200, 9750, 7),
-        "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10000", 200, 10000, 7),
-        "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10250", 200, 10250, 7),
-        "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10500", 200, 10500, 7),
+            ), 
+            "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy(
+                "VOLCANIC_ROCK_VOUCHER_9500",
+                limits["VOLCANIC_ROCK_VOUCHER_9500"],
+                9500,
+                7,
+                mean_iv=0.159,
+                z_thresh=1,
+                exit_z=0.3,
+                std_window=30
+            ),
+            "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy(
+                "VOLCANIC_ROCK_VOUCHER_9750",
+                limits["VOLCANIC_ROCK_VOUCHER_9750"],
+                9750,
+                7,
+                mean_iv=0.167,
+                z_thresh=5.0,
+                exit_z=0.3,
+                std_window=30
+            ),
+            "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy(
+                "VOLCANIC_ROCK_VOUCHER_10000",
+                limits["VOLCANIC_ROCK_VOUCHER_10000"],
+                10000,
+                7,
+                mean_iv=0.173,
+                z_thresh=5.0,
+                exit_z=0.3,
+                std_window=30
+            ),
+            "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy(
+                "VOLCANIC_ROCK_VOUCHER_10250",
+                limits["VOLCANIC_ROCK_VOUCHER_10250"],
+                10250,
+                7,
+                mean_iv=0.181,
+                z_thresh=5.0,
+                exit_z=0.3,
+                std_window=30
+            ),
+            "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy(
+                "VOLCANIC_ROCK_VOUCHER_10500",
+                limits["VOLCANIC_ROCK_VOUCHER_10500"],
+                10500,
+                7,
+                mean_iv=0.188,
+                z_thresh=5.0,
+                exit_z=0.3,
+                std_window=30
+            ),
+
+
 
         }
 
