@@ -659,7 +659,7 @@ class Trader:
             "CROISSANTS", "JAMS",
             limits["CROISSANTS"],
             limits["JAMS"],
-            buy_threshold=.8,        # Increase threshold if data indicates a larger move is required.
+            buy_threshold=.6,        # Increase threshold if data indicates a larger move is required.
             sell_threshold=1,       # Likewise for the sell threshold.
             exit_threshold=0.15,      # Adjust exit threshold to match reversion characteristics.
             mean=0.6519  ,          # Update to reflect the historical mean ratio.
