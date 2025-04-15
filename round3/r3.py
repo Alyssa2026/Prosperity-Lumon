@@ -789,7 +789,7 @@ class VolcanicVoucherStrategy(Strategy):
         """
         super().__init__(symbol, limit)
         self.strike_price = strike_price
-        self.tau = 0.006 # threshold for mispricing
+        self.tau = 0.05 # threshold for mispricing
         self.size = int(0.5 * limit)  # trade size
         self.history = []  # for plotting
 
@@ -959,12 +959,16 @@ class Trader:
             new_trader_data[key] = strategy.save()
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, orders, conversions, trader_data)
-        all_history = []
-        for key, strategy in self.strategies.items():
-            if isinstance(strategy, VolcanicVoucherStrategy):
-                all_history.extend(strategy.history)
-
-        plot_trade_decisions(all_history)
+        # ✅ Plot only once — at the very end of the run
+        
+        if state.timestamp > 1_700_000:  # Final few ticks
+            all_history = []
+            logger.print("are you getting freaky yet")
+            for key, strategy in self.strategies.items():
+                if isinstance(strategy, VolcanicVoucherStrategy):
+                    all_history.extend(strategy.history)
+            plot_trade_decisions(all_history)
+            plot_iv_vs_strike(compute_voucher_common_data(state))  # optional
 
 
         return orders, conversions, trader_data
