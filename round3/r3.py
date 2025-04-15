@@ -5,11 +5,14 @@ import statistics
 from math import log, sqrt, exp
 from statistics import NormalDist
 
+from matplotlib.pylab import norm
 import numpy as np
+import pandas as pd
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 from typing import Any, Dict, List, TypeAlias
 from statistics import NormalDist
 import math
+
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
@@ -658,27 +661,6 @@ CURRENT_ROUND = 3
 from math import log, sqrt, exp
 from statistics import NormalDist
 
-def BS_CALL(S, K, T, r, sigma):
-    if T <= 0 or sigma <= 0:
-        return max(0, S - K)
-    d1 = (log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt(T))
-    d2 = d1 - sigma * sqrt(T)
-    return S * NormalDist().cdf(d1) - K * exp(-r * T) * NormalDist().cdf(d2)
-
-def implied_volatility(S, K, T, r, market_price, tol=1e-5, max_iter=100):
-    # Use binary search for IV between 0.01 and 3.0
-    low, high = 0.01, 3.0
-    for _ in range(max_iter):
-        mid = (low + high) / 2
-        price = BS_CALL(S, K, T, r, mid)
-        if abs(price - market_price) < tol:
-            return mid
-        if price > market_price:
-            high = mid
-        else:
-            low = mid
-    return mid
-
 
 from collections import deque
 
@@ -687,9 +669,14 @@ class VolcanicVoucherStrategy(Strategy):
         super().__init__(symbol, limit)
         self.strike_price = strike_price
         self.r = 0
-        self.threshold = 2
-        self.vol_window = deque(maxlen=25)  # rolling window of IVs
+        self.threshold_entry = 1.0  # instead of 1.5
+        self.threshold_exit = 0.2   # instead of 0.3
+        self.vol_window = deque(maxlen=20)
         self.prev_sigma = 0.17
+        self.window = 20  # rolling window for z-score
+        self.size = int(0.25 * limit)  # always trade full position
+        self.cash = 0
+        self.position = 0
 
     def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
         order_depth = state.order_depths.get(symbol)
@@ -698,6 +685,43 @@ class VolcanicVoucherStrategy(Strategy):
         bid = max(order_depth.buy_orders)
         ask = min(order_depth.sell_orders)
         return (bid + ask) / 2
+
+    @staticmethod
+    def BS_CALL(S, K, T, r, sigma):
+        if T <= 0 or sigma <= 0:
+            return max(0, S - K)
+        d1 = (log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt(T))
+        d2 = d1 - sigma * sqrt(T)
+        return S * NormalDist().cdf(d1) - K * exp(-r * T) * NormalDist().cdf(d2)
+
+    @staticmethod
+    def implied_volatility(S, K, T, r, market_price, tol=1e-5, max_iter=100):
+        low, high = 0.01, 3.0
+        for _ in range(max_iter):
+            mid = (low + high) / 2
+            price = VolcanicVoucherStrategy.BS_CALL(S, K, T, r, mid)
+            if abs(price - market_price) < tol:
+                return mid
+            if price > market_price:
+                high = mid
+            else:
+                low = mid
+        return mid
+
+    @staticmethod
+    def average_implied_volatility(spot_price: float, voucher_prices: dict[str, float], T: float, r: float) -> float:
+        total_iv = 0
+        count = 0
+        for symbol, price in voucher_prices.items():
+            try:
+                strike = int(symbol.split('_')[-1])
+                iv = VolcanicVoucherStrategy.implied_volatility(spot_price, strike, T, r, price)
+                if not np.isnan(iv):
+                    total_iv += iv
+                    count += 1
+            except Exception:
+                continue
+        return total_iv / count if count > 0 else float('nan')
 
     def act(self, state: TradingState) -> None:
         voucher_price = self.get_mid_price(state, self.symbol)
@@ -709,50 +733,73 @@ class VolcanicVoucherStrategy(Strategy):
         days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
         T = days_to_expiry / 365
 
-        # === Step 1: Price current voucher using average volatility
-        fair_value = BS_CALL(S=rock_price, K=self.strike_price, T=T, r=self.r, sigma=self.prev_sigma)
-        logger.print("FAIR VALUE: ", round(fair_value))
-        logger.print("MARKET VALUE: ", round(voucher_price))
-        logger.print("PERFECTLY PRICED" if abs(round(fair_value) - round(voucher_price)) <= 2 else "MISPRICED")
+        # Build voucher_prices dict for all 5 vouchers
+        voucher_prices_dict = {}
+        for strike in [9500, 9750, 10000, 10250, 10500]:
+            symbol = f"VOLCANIC_ROCK_VOUCHER_{strike}"
+            price = self.get_mid_price(state, symbol)
+            if price is not None:
+                voucher_prices_dict[symbol] = price
 
-        # === Step 2: Trade on mispricing
-        position = state.position.get(self.symbol, 0)
-        order_depth = state.order_depths[self.symbol]
+        iv = self.average_implied_volatility(rock_price, voucher_prices_dict, T, self.r)
+        if np.isnan(iv):
+            return
 
-        if voucher_price > fair_value + self.threshold:
-            to_sell = self.limit + position
-            for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                if price >= fair_value + self.threshold:
-                    qty = min(volume, to_sell)
-                    self.sell(price, qty)
-                    to_sell -= qty
-                    if to_sell <= 0:
-                        break
-        elif voucher_price < fair_value - self.threshold:
-            to_buy = self.limit - position
-            for price, volume in sorted(order_depth.sell_orders.items()):
-                if price <= fair_value - self.threshold:
-                    qty = min(-volume, to_buy)
-                    self.buy(price, qty)
-                    to_buy -= qty
-                    if to_buy <= 0:
-                        break
-
-        # === Step 3: Update implied volatility estimate from market price
-        iv = implied_volatility(S=rock_price, K=self.strike_price, T=T, r=self.r, market_price=voucher_price)
         self.vol_window.append(iv)
-        self.prev_sigma = sum(self.vol_window) / len(self.vol_window)
+        iv_series = pd.Series(self.vol_window)
+        mean = iv_series.rolling(window=self.window, min_periods=1).mean().iloc[-1]
+        std = iv_series.rolling(window=self.window, min_periods=1).std().iloc[-1]
+
+        if std == 0 or np.isnan(std):
+            return
+
+        z = (iv - mean) / std
+
+        orders = []
+
+        if z < -2 and self.position == 0: # messed around with these values
+            qty = self.size
+            self.cash -= qty * voucher_price
+            self.position += qty
+            orders.append(Order(self.symbol, round(voucher_price), qty))
+
+        elif z > 2 and self.position == 0:
+            qty = -self.size
+            self.cash -= qty * voucher_price
+            self.position += qty
+            orders.append(Order(self.symbol, round(voucher_price), qty))
+
+        elif abs(z) < self.threshold_exit and self.position != 0:
+            qty = -self.position
+            self.cash -= qty * voucher_price
+            self.position = 0
+            orders.append(Order(self.symbol, round(voucher_price), qty))
+
+        self.prev_sigma = iv
+        self.last_orders = orders
+
+    def run(self, state: TradingState) -> list[Order]:
+        self.last_orders = []
+        self.act(state)
+        return self.last_orders
 
     def save(self) -> JSON:
         return {
             "prev_sigma": self.prev_sigma,
             "vol_window": list(self.vol_window),
+            "cash": self.cash,
+            "position": self.position
         }
 
     def load(self, data: JSON) -> None:
         if data:
             self.prev_sigma = data.get("prev_sigma", 0.17)
+            self.cash = data.get("cash", 0)
+            self.position = data.get("position", 0)
             self.vol_window = deque(data.get("vol_window", []), maxlen=10)
+
+
+
 
 
 
@@ -786,11 +833,11 @@ class Trader:
             "PICNIC_BASKET1": 0,
             "PICNIC_BASKET2": 0,
             "VOLCANIC_ROCK": 0,
-            "VOLCANIC_ROCK_VOUCHER_9500": 0,
+            "VOLCANIC_ROCK_VOUCHER_9500": 200,
             "VOLCANIC_ROCK_VOUCHER_9750": 200,
-            "VOLCANIC_ROCK_VOUCHER_10000": 0,
-            "VOLCANIC_ROCK_VOUCHER_10250": 0,
-            "VOLCANIC_ROCK_VOUCHER_10500": 0,
+            "VOLCANIC_ROCK_VOUCHER_10000": 200,
+            "VOLCANIC_ROCK_VOUCHER_10250": 200,
+            "VOLCANIC_ROCK_VOUCHER_10500": 200,
         }
         
         # Store individual strategies and, for croissants and jam, a combined pairs strategy.
@@ -829,7 +876,7 @@ class Trader:
 
     # Add vouchers separately with initial expiry of 7
         #for strike in [9500, 9750, 10000, 10250, 10500]:
-        for strike in [9750]:
+        for strike in  [9500, 9750, 10000, 10250, 10500]:
             symbol = f"VOLCANIC_ROCK_VOUCHER_{strike}"
             self.strategies[symbol] = VolcanicVoucherStrategy(symbol, limits[symbol], strike_price=strike)
 
