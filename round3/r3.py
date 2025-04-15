@@ -959,9 +959,10 @@ class Trader:
             new_trader_data[key] = strategy.save()
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, orders, conversions, trader_data)
-        # ✅ Plot only once — at the very end of the run
-        
-        if state.timestamp > 1_700_000:  # Final few ticks
+        #  Plot only once — at the very end of the run
+        logger.print("hello ")
+        logger.print(69696969, state.timestamp )
+        if int(state.timestamp) >1000:  # modify ticks 
             all_history = []
             logger.print("are you getting freaky yet")
             for key, strategy in self.strategies.items():
