@@ -6,6 +6,8 @@ import statistics
 import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 from typing import Any, Dict, List, TypeAlias
+from statistics import NormalDist
+import math
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
@@ -578,25 +580,72 @@ class DjembeRatioArbitrageStrategy(Strategy):
                     position += qty
                     if position >= 0:
                         break
+def BS_CALL(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Black-Scholes Call Option Pricing"""
+    if T <= 0 or sigma == 0:
+        return max(0, S - K)
+    N = NormalDist().cdf
+    d1 = (math.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return S * N(d1) - K * math.exp(-r*T) * N(d2)
+
 class VolcanicVoucherStrategy(Strategy):
     def __init__(self, symbol: str, limit: int, strike_price: int, expiry_days: int) -> None:
         super().__init__(symbol, limit)
         self.strike_price = strike_price
-        self.expiry_days = expiry_days  # Days remaining to expiry, can be updated per round
+        self.expiry_days = expiry_days
+        self.r = 0  # risk-free rate assumed 0
+        self.sigma = 0.15  # initial guess for volatility
+        self.threshold = 2  # minimum price difference for action
+
+    def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
+        order_depth = state.order_depths.get(symbol)
+        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+            return None
+        bid = max(order_depth.buy_orders)
+        ask = min(order_depth.sell_orders)
+        return (bid + ask) / 2
 
     def act(self, state: TradingState) -> None:
-        # Placeholder logic for now
-        pass
+        # Get mid prices
+        voucher_price = self.get_mid_price(state, self.symbol)
+        rock_price = self.get_mid_price(state, "VOLCANIC_ROCK")
+
+        if voucher_price is None or rock_price is None:
+            return
+
+        T = self.expiry_days / 365  # Time to expiration in years
+        fair_value = BS_CALL(S=rock_price, K=self.strike_price, T=T, r=self.r, sigma=self.sigma)
+
+        position = state.position.get(self.symbol, 0)
+        order_depth = state.order_depths[self.symbol]
+
+        # If overvalued → short
+        if voucher_price > fair_value + self.threshold:
+            to_sell = self.limit + position
+            for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                qty = min(volume, to_sell)
+                self.sell(price, qty)
+                to_sell -= qty
+                if to_sell <= 0:
+                    break
+
+        # If undervalued → long
+        elif voucher_price < fair_value - self.threshold:
+            to_buy = self.limit - position
+            for price, volume in sorted(order_depth.sell_orders.items()):
+                qty = min(-volume, to_buy)
+                self.buy(price, qty)
+                to_buy -= qty
+                if to_buy <= 0:
+                    break
 
     def save(self) -> JSON:
-        return {
-            "strike_price": self.strike_price,
-            "expiry_days": self.expiry_days
-        }
+        return {"expiry_days": self.expiry_days}
 
     def load(self, data: JSON) -> None:
-        self.strike_price = data.get("strike_price", self.strike_price)
-        self.expiry_days = data.get("expiry_days", self.expiry_days)
+        if data:
+            self.expiry_days = data.get("expiry_days", self.expiry_days)
 
 
                 
@@ -623,8 +672,8 @@ class Trader:
             "KELP": 0,
             "RAINFOREST_RESIN": 0,
             "SQUID_INK": 0,
-            "CROISSANTS": 250,
-            "JAMS": 350,
+            "CROISSANTS": 0,
+            "JAMS": 0,
             "DJEMBES": 0,
             "PICNIC_BASKET1": 0,
             "PICNIC_BASKET2": 0,
@@ -666,33 +715,41 @@ class Trader:
             std=0.0032  ,       # Update to reflect the measured standard deviation.
             order_size=20         # Adjust order size based on trade frequency and liquidity.
         ), 
-        "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9500", 200, 9500, 7), # clean up later
-        "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9750", 200, 9750, 7),
-        "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10000", 200, 10000, 7),
-        "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10250", 200, 10250, 7),
-        "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10500", 200, 10500, 7),
+        
 
         }
+
+    # Add vouchers separately with initial expiry of 7
+        for strike in [9500, 9750, 10000, 10250, 10500]:
+            symbol = f"VOLCANIC_ROCK_VOUCHER_{strike}"
+            self.strategies[symbol] = VolcanicVoucherStrategy(symbol, 200, strike_price=strike, expiry_days=7)
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
         logger.print(state.position)
         conversions = 0
-        # Use the strategy keys (not the raw state.order_depths) so that we include the pairs strategy.
+
         old_trader_data = json.loads(state.traderData) if state.traderData != "" else {}
         new_trader_data = {}
         orders: Dict[str, List[Order]] = {}
-        # Iterate over the strategies, load/save each strategy's persistent data,
-        # and merge orders. For strategies returning a list (single symbol) we use their symbol as key,
-        # and for strategies returning a dict (multi-symbol, e.g. pairs) we update the orders dict.
+
         for key, strategy in self.strategies.items():
             if key in old_trader_data:
-                strategy.load(old_trader_data.get(key, None))
+                strategy.load(old_trader_data[key])
+
+            # ⬇️ Decrement expiry_days by 1 if this is a volcanic voucher strategy
+            if isinstance(strategy, VolcanicVoucherStrategy):
+                if strategy.expiry_days > 0:
+                    strategy.expiry_days -= 1
+
             result = strategy.run(state)
+
             if isinstance(result, list):  # single-symbol strategy
                 orders[strategy.symbol] = result
             elif isinstance(result, dict):  # multi-symbol strategy
                 orders.update(result)
+
             new_trader_data[key] = strategy.save()
+
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, orders, conversions, trader_data)
         return orders, conversions, trader_data
