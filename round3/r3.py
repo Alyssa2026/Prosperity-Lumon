@@ -8,6 +8,8 @@ from statistics import NormalDist
 import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 from typing import Any, Dict, List, TypeAlias
+from statistics import NormalDist
+import math
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
@@ -641,76 +643,116 @@ class DjembeRatioArbitrageStrategy(Strategy):
                     position += qty
                     if position >= 0:
                         break
+def BS_CALL(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Black-Scholes Call Option Pricing"""
+    if T <= 0 or sigma == 0:
+        return max(0, S - K)
+    N = NormalDist().cdf
+    d1 = (math.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return S * N(d1) - K * math.exp(-r*T) * N(d2)
+
+EXPIRY_DAY = 7
+CURRENT_ROUND = 3
+
+from math import log, sqrt, exp
+from statistics import NormalDist
+
+def BS_CALL(S, K, T, r, sigma):
+    if T <= 0 or sigma <= 0:
+        return max(0, S - K)
+    d1 = (log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt(T))
+    d2 = d1 - sigma * sqrt(T)
+    return S * NormalDist().cdf(d1) - K * exp(-r * T) * NormalDist().cdf(d2)
+
+def implied_volatility(S, K, T, r, market_price, tol=1e-5, max_iter=100):
+    # Use binary search for IV between 0.01 and 3.0
+    low, high = 0.01, 3.0
+    for _ in range(max_iter):
+        mid = (low + high) / 2
+        price = BS_CALL(S, K, T, r, mid)
+        if abs(price - market_price) < tol:
+            return mid
+        if price > market_price:
+            high = mid
+        else:
+            low = mid
+    return mid
+
+
+from collections import deque
+
 class VolcanicVoucherStrategy(Strategy):
-    def __init__(
-        self,
-        symbol: str,
-        limit: int,
-        strike_price: int,
-        expiry_days: int,
-        mean_iv: float = 0.159,
-        z_thresh: float = 5.0,
-        exit_z: float = 0.3,
-        std_window: int = 30,
-    ) -> None:
+    def __init__(self, symbol: str, limit: int, strike_price: int) -> None:
         super().__init__(symbol, limit)
         self.strike_price = strike_price
-        self.expiry_days = expiry_days
-        self.mean_iv = mean_iv
-        self.z_thresh = z_thresh
-        self.exit_z = exit_z
-        self.std_window = std_window
-        self.iv_record = {"past_iv": [], "prev_price": None}
+        self.r = 0
+        self.threshold = 2
+        self.vol_window = deque(maxlen=25)  # rolling window of IVs
+        self.prev_sigma = 0.17
+
+    def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
+        order_depth = state.order_depths.get(symbol)
+        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+            return None
+        bid = max(order_depth.buy_orders)
+        ask = min(order_depth.sell_orders)
+        return (bid + ask) / 2
 
     def act(self, state: TradingState) -> None:
-        order_depth = state.order_depths.get(self.symbol)
-        underlying_depth = state.order_depths.get("VOLCANIC_ROCK")
+        voucher_price = self.get_mid_price(state, self.symbol)
+        rock_price = self.get_mid_price(state, "VOLCANIC_ROCK")
+        if voucher_price is None or rock_price is None:
+            return
+
+        fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
+        days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
+        T = days_to_expiry / 365
+
+        # === Step 1: Price current voucher using average volatility
+        fair_value = BS_CALL(S=rock_price, K=self.strike_price, T=T, r=self.r, sigma=self.prev_sigma)
+        logger.print("FAIR VALUE: ", round(fair_value))
+        logger.print("MARKET VALUE: ", round(voucher_price))
+        logger.print("PERFECTLY PRICED" if abs(round(fair_value) - round(voucher_price)) <= 2 else "MISPRICED")
+
+        # === Step 2: Trade on mispricing
         position = state.position.get(self.symbol, 0)
+        order_depth = state.order_depths[self.symbol]
 
-        if not order_depth or not underlying_depth:
-            return
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return
+        if voucher_price > fair_value + self.threshold:
+            to_sell = self.limit + position
+            for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                if price >= fair_value + self.threshold:
+                    qty = min(volume, to_sell)
+                    self.sell(price, qty)
+                    to_sell -= qty
+                    if to_sell <= 0:
+                        break
+        elif voucher_price < fair_value - self.threshold:
+            to_buy = self.limit - position
+            for price, volume in sorted(order_depth.sell_orders.items()):
+                if price <= fair_value - self.threshold:
+                    qty = min(-volume, to_buy)
+                    self.buy(price, qty)
+                    to_buy -= qty
+                    if to_buy <= 0:
+                        break
 
-        best_bid = max(order_depth.buy_orders)
-        best_ask = min(order_depth.sell_orders)
+        # === Step 3: Update implied volatility estimate from market price
+        iv = implied_volatility(S=rock_price, K=self.strike_price, T=T, r=self.r, market_price=voucher_price)
+        self.vol_window.append(iv)
+        self.prev_sigma = sum(self.vol_window) / len(self.vol_window)
 
-        rock_bid = max(underlying_depth.buy_orders)
-        rock_ask = min(underlying_depth.sell_orders)
-        rock_price = (rock_bid + rock_ask) / 2
+    def save(self) -> JSON:
+        return {
+            "prev_sigma": self.prev_sigma,
+            "vol_window": list(self.vol_window),
+        }
 
-        true_day = state.timestamp // 1_000_000 + 3
-        within_day = (state.timestamp % 1_000_000) / 1_000_000
-        tte = (8 - true_day - within_day) / 250
-        if tte <= 0:
-            return
-
-        # Use Black-Scholes to compute fair value (call price)
-        fair_price = BlackScholes.black_scholes_call(
-            rock_price, self.strike_price, tte, self.mean_iv
-        )
-
-        # Market make around fair_price
-        spread = 1  # can tune
-        buy_price = round(fair_price - spread)
-        sell_price = round(fair_price + spread)
-
-        # Place orders respecting position limits
-        to_buy = self.limit - position
-        to_sell = self.limit + position
-
-        if to_buy > 0:
-            self.buy(buy_price, to_buy)
-        if to_sell > 0:
-            self.sell(sell_price, to_sell)
-
-        def save(self) -> JSON:
-            return self.iv_record
-
-        def load(self, data: JSON) -> None:
-            if isinstance(data, dict):
-                self.iv_record = data
-
+    def load(self, data: JSON) -> None:
+        if data:
+            self.prev_sigma = data.get("prev_sigma", 0.17)
+            self.vol_window = deque(data.get("vol_window", []), maxlen=10)
 
 
 
@@ -744,8 +786,8 @@ class Trader:
             "PICNIC_BASKET1": 0,
             "PICNIC_BASKET2": 0,
             "VOLCANIC_ROCK": 0,
-            "VOLCANIC_ROCK_VOUCHER_9500": 200,
-            "VOLCANIC_ROCK_VOUCHER_9750": 0,
+            "VOLCANIC_ROCK_VOUCHER_9500": 0,
+            "VOLCANIC_ROCK_VOUCHER_9750": 200,
             "VOLCANIC_ROCK_VOUCHER_10000": 0,
             "VOLCANIC_ROCK_VOUCHER_10250": 0,
             "VOLCANIC_ROCK_VOUCHER_10500": 0,
@@ -774,87 +816,42 @@ class Trader:
             "CROISSANTS", "JAMS",
             limits["CROISSANTS"],
             limits["JAMS"],
-            buy_threshold=.8,        # Increase threshold if data indicates a larger move is required.
+            buy_threshold=.6,        # Increase threshold if data indicates a larger move is required.
             sell_threshold=1,       # Likewise for the sell threshold.
             exit_threshold=0.15,      # Adjust exit threshold to match reversion characteristics.
             mean=0.6519  ,          # Update to reflect the historical mean ratio.
             std=0.0032  ,       # Update to reflect the measured standard deviation.
             order_size=20         # Adjust order size based on trade frequency and liquidity.
-            ), 
-            "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy(
-                "VOLCANIC_ROCK_VOUCHER_9500",
-                limits["VOLCANIC_ROCK_VOUCHER_9500"],
-                9500,
-                7,
-                mean_iv=0.159,
-                z_thresh=1,
-                exit_z=0.3,
-                std_window=30
-            ),
-            "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy(
-                "VOLCANIC_ROCK_VOUCHER_9750",
-                limits["VOLCANIC_ROCK_VOUCHER_9750"],
-                9750,
-                7,
-                mean_iv=0.167,
-                z_thresh=5.0,
-                exit_z=0.3,
-                std_window=30
-            ),
-            "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy(
-                "VOLCANIC_ROCK_VOUCHER_10000",
-                limits["VOLCANIC_ROCK_VOUCHER_10000"],
-                10000,
-                7,
-                mean_iv=0.173,
-                z_thresh=5.0,
-                exit_z=0.3,
-                std_window=30
-            ),
-            "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy(
-                "VOLCANIC_ROCK_VOUCHER_10250",
-                limits["VOLCANIC_ROCK_VOUCHER_10250"],
-                10250,
-                7,
-                mean_iv=0.181,
-                z_thresh=5.0,
-                exit_z=0.3,
-                std_window=30
-            ),
-            "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy(
-                "VOLCANIC_ROCK_VOUCHER_10500",
-                limits["VOLCANIC_ROCK_VOUCHER_10500"],
-                10500,
-                7,
-                mean_iv=0.188,
-                z_thresh=5.0,
-                exit_z=0.3,
-                std_window=30
-            ),
-
-
+        ), 
+        
 
         }
+
+    # Add vouchers separately with initial expiry of 7
+        #for strike in [9500, 9750, 10000, 10250, 10500]:
+        for strike in [9750]:
+            symbol = f"VOLCANIC_ROCK_VOUCHER_{strike}"
+            self.strategies[symbol] = VolcanicVoucherStrategy(symbol, limits[symbol], strike_price=strike)
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
         logger.print(state.position)
         conversions = 0
-        # Use the strategy keys (not the raw state.order_depths) so that we include the pairs strategy.
+
         old_trader_data = json.loads(state.traderData) if state.traderData != "" else {}
         new_trader_data = {}
         orders: Dict[str, List[Order]] = {}
-        # Iterate over the strategies, load/save each strategy's persistent data,
-        # and merge orders. For strategies returning a list (single symbol) we use their symbol as key,
-        # and for strategies returning a dict (multi-symbol, e.g. pairs) we update the orders dict.
+
         for key, strategy in self.strategies.items():
             if key in old_trader_data:
-                strategy.load(old_trader_data.get(key, None))
+                strategy.load(old_trader_data[key])
             result = strategy.run(state)
             if isinstance(result, list):  # single-symbol strategy
                 orders[strategy.symbol] = result
             elif isinstance(result, dict):  # multi-symbol strategy
                 orders.update(result)
+
             new_trader_data[key] = strategy.save()
+
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, orders, conversions, trader_data)
         return orders, conversions, trader_data
