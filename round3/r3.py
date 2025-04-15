@@ -674,7 +674,6 @@ class VolcanicVoucherStrategy(Strategy):
 
         best_bid = max(order_depth.buy_orders)
         best_ask = min(order_depth.sell_orders)
-        voucher_price = (best_bid + best_ask) / 2
 
         rock_bid = max(underlying_depth.buy_orders)
         rock_ask = min(underlying_depth.sell_orders)
@@ -686,41 +685,31 @@ class VolcanicVoucherStrategy(Strategy):
         if tte <= 0:
             return
 
-        # Only recompute IV if price changed
-        if self.iv_record["prev_price"] != voucher_price:
-            iv = BlackScholes.implied_volatility(
-                voucher_price, rock_price, self.strike_price, tte
-            )
-            if iv is not None:
-                self.iv_record["prev_price"] = voucher_price
-                self.iv_record["past_iv"].append(iv)
-                if len(self.iv_record["past_iv"]) > self.std_window:
-                    self.iv_record["past_iv"].pop(0)
+        # Use Black-Scholes to compute fair value (call price)
+        fair_price = BlackScholes.black_scholes_call(
+            rock_price, self.strike_price, tte, self.mean_iv
+        )
 
-        if len(self.iv_record["past_iv"]) < self.std_window:
-            return
+        # Market make around fair_price
+        spread = 1  # can tune
+        buy_price = round(fair_price - spread)
+        sell_price = round(fair_price + spread)
 
-        current_iv = self.iv_record["past_iv"][-1]
-        std_iv = np.std(self.iv_record["past_iv"])
-        z = (current_iv - self.mean_iv) / std_iv if std_iv > 0 else 0
+        # Place orders respecting position limits
+        to_buy = self.limit - position
+        to_sell = self.limit + position
 
-        # Execute strategy
-        if z > self.z_thresh and position > -self.limit:
-            self.sell(best_bid, self.limit + position)
-        elif z < -self.z_thresh and position < self.limit:
-            self.buy(best_ask, self.limit - position)
-        elif abs(z) < self.exit_z and position != 0:
-            if position > 0:
-                self.sell(best_bid, position)
-            else:
-                self.buy(best_ask, -position)
+        if to_buy > 0:
+            self.buy(buy_price, to_buy)
+        if to_sell > 0:
+            self.sell(sell_price, to_sell)
 
-    def save(self) -> JSON:
-        return self.iv_record
+        def save(self) -> JSON:
+            return self.iv_record
 
-    def load(self, data: JSON) -> None:
-        if isinstance(data, dict):
-            self.iv_record = data
+        def load(self, data: JSON) -> None:
+            if isinstance(data, dict):
+                self.iv_record = data
 
 
 
