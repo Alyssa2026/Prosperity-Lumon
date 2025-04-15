@@ -1,10 +1,8 @@
 import json
 from abc import abstractmethod
 from collections import deque
-import statistics
 from math import log, sqrt, exp
 from statistics import NormalDist
-
 from matplotlib.pylab import norm
 import numpy as np
 import pandas as pd
@@ -12,6 +10,13 @@ from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder
 from typing import Any, Dict, List, TypeAlias
 from statistics import NormalDist
 import math
+from math import log, sqrt, exp
+from collections import deque
+import numpy as np
+import pandas as pd
+from scipy import stats, optimize
+from datamodel import Order, TradingState, Symbol
+from collections import deque
 
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
@@ -76,6 +81,7 @@ class BlackScholes:
                 low_vol = volatility
             volatility = (low_vol + high_vol) / 2.0
         return volatility
+    
     
 class Logger:
     def __init__(self) -> None:
@@ -646,72 +652,19 @@ class DjembeRatioArbitrageStrategy(Strategy):
                     position += qty
                     if position >= 0:
                         break
-def BS_CALL(S: float, K: float, T: float, r: float, sigma: float) -> float:
-    """Black-Scholes Call Option Pricing"""
-    if T <= 0 or sigma == 0:
-        return max(0, S - K)
-    N = NormalDist().cdf
-    d1 = (math.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
-    return S * N(d1) - K * math.exp(-r*T) * N(d2)
+
+
+def compute_mid_price(order_depth: OrderDepth) -> float | None:
+    if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+        return None
+    best_bid = max(order_depth.buy_orders.keys())
+    best_ask = min(order_depth.sell_orders.keys())
+    return (best_bid + best_ask) / 2
 
 EXPIRY_DAY = 7
 CURRENT_ROUND = 3
 
-from math import log, sqrt, exp
-from statistics import NormalDist
-
-import math
-from math import log, sqrt, exp
-from collections import deque
-import numpy as np
-import pandas as pd
-from scipy import stats, optimize
-from datamodel import Order, TradingState, Symbol
-from collections import deque
-TTE = 5.0  # Assume Time-To-Expiry in days
-
-# --- Black-Scholes Helper Functions ---
-
-def bs_call_price(S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float:
-    d1 = (math.log(S / K) + 0.5 * sigma**2 * T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
-    return S * stats.norm.cdf(d1) - K * math.exp(-r * T) * stats.norm.cdf(d2)
-
-def implied_vol(S: float, K: float, T: float, market_price: float, r: float = 0.0) -> float:
-    def f(sigma: float) -> float:
-        return bs_call_price(S, K, T, sigma, r) - market_price
-    try:
-        vol = optimize.brentq(f, 1e-6, 5.0)
-    except Exception:
-        vol = float('nan')
-    return vol
-
-# --- Common Data Calculation for Voucher Strategies ---
 def compute_voucher_common_data(state: TradingState) -> Dict[str, Any]:
-    """
-    Compute common voucher data once per tick:
-      - Underlying mid price from "VOLCANIC_ROCK"
-      - For each voucher, retrieve mid price, compute normalized moneyness m and implied volatility iv.
-      - Fit quadratic regression to the (m, iv) data across all vouchers.
-    Returns a dictionary with:
-      underlying_price, a dict mapping voucher symbol -> (m, iv, mid_price),
-      regression coefficients, and base_iv.
-    """
-    # Get underlying mid-price
-    def get_mid_price(symbol: str) -> float | None:
-        order_depth = state.order_depths.get(symbol)
-        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
-        bid = max(order_depth.buy_orders.keys())
-        ask = min(order_depth.sell_orders.keys())
-        return (bid + ask) / 2
-
-    underlying_price = get_mid_price("VOLCANIC_ROCK")
-    if underlying_price is None:
-        return {}
-
-    # Define voucher instruments and strikes.
     vouchers = [
         ("VOLCANIC_ROCK_VOUCHER_9500", 9500),
         ("VOLCANIC_ROCK_VOUCHER_9750", 9750),
@@ -720,37 +673,111 @@ def compute_voucher_common_data(state: TradingState) -> Dict[str, Any]:
         ("VOLCANIC_ROCK_VOUCHER_10500", 10500)
     ]
 
-    common_voucher_data = {}  # Map voucher symbol -> (m, iv, mid_price)
-    m_vals = []
-    iv_vals = []
-    for sym, strike in vouchers:
-        price = get_mid_price(sym)
-        if price is None:
-            continue
-        # Normalize moneyness: m = ln(K / underlying_price) / sqrt(TTE)
-        m = log(strike / underlying_price) / sqrt(TTE)
-        # Compute implied volatility using voucher's mid-price.
-        iv = implied_vol(underlying_price, strike, TTE, price, r=0)
-        if math.isnan(iv):
-            continue
-        m_vals.append(m)
-        iv_vals.append(iv)
-        common_voucher_data[sym] = {"m": m, "iv": iv, "mid_price": price}
-    
-    # Only proceed if we have enough points.
-    if len(m_vals) < 3:
+    rock_symbol = "VOLCANIC_ROCK"
+    rock_depth = state.order_depths.get(rock_symbol)
+    spot_price = compute_mid_price(rock_depth)
+    if spot_price is None:
         return {}
 
-    # Fit quadratic regression: iv(m) = a*m^2 + b*m + c, base_iv = c.
-    coeffs = np.polyfit(m_vals, iv_vals, 2)  # coefficients: [a, b, c]
-    base_iv = coeffs[2]
+    # Convert timestamp to remaining trading days
+    fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
+    days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
+    TTE = days_to_expiry / 365
+    # current_round = state.timestamp // 100
+    # EXPIRY_DAY = 7
+    # TTE = max(0.5, EXPIRY_DAY - current_round)  # Ensure non-zero time to expiry
+
+    m_iv_pairs = []
+
+    for symbol, strike in vouchers:
+        depth = state.order_depths.get(symbol)
+        voucher_price = compute_mid_price(depth)
+        if voucher_price is None:
+            continue
+
+        try:
+            m_t = math.log(strike / spot_price) / math.sqrt(TTE)
+            v_t = BlackScholes.implied_volatility(
+                voucher_price, spot_price, strike, TTE
+            )
+            if not math.isnan(v_t) and not math.isinf(v_t):
+                m_iv_pairs.append((m_t, v_t))
+        except:
+            continue
+
+    if len(m_iv_pairs) < 3:
+        return {}  # Not enough data for fitting
+
+    ms = np.array([m for m, _ in m_iv_pairs])
+    ivs = np.array([v for _, v in m_iv_pairs])
+    coeffs = np.polyfit(ms, ivs, 2)  # [a, b, c]
 
     return {
-        "underlying_price": underlying_price,
-        "voucher_data": common_voucher_data,
-        "regression_coeffs": coeffs,
-        "base_iv": base_iv
+        "spot_price": spot_price,
+        "TTE": TTE,
+        "iv_curve": tuple(coeffs),
+        "m_iv_pairs": m_iv_pairs  # Optional, good for debugging
     }
+
+    
+import matplotlib.pyplot as plt
+
+def plot_iv_vs_strike(common_data):
+    if not common_data or "m_iv_pairs" not in common_data:
+        print("No IV data to plot.")
+        return
+
+    m_iv = common_data["m_iv_pairs"]
+    spot = common_data["spot_price"]
+    TTE = common_data["TTE"]
+    a, b, c = common_data["iv_curve"]
+
+    # Convert m back to strike prices to match m = log(K/S)/sqrt(TTE)
+    strikes = [spot * math.exp(m * math.sqrt(TTE)) for m, _ in m_iv]
+    ivs = [v for _, v in m_iv]
+
+    # Sort for cleaner plotting
+    combined = sorted(zip(strikes, ivs), key=lambda x: x[0])
+    strikes_sorted, ivs_sorted = zip(*combined)
+
+    # Generate smooth m values for fitted curve
+    m_vals = np.linspace(min(m for m, _ in m_iv), max(m for m, _ in m_iv), 100)
+    fitted_ivs = [a * m**2 + b * m + c for m in m_vals]
+    fitted_strikes = [spot * math.exp(m * math.sqrt(TTE)) for m in m_vals]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(strikes_sorted, ivs_sorted, 'o', label="Actual Implied Vols")
+    plt.plot(fitted_strikes, fitted_ivs, '--', label="Fitted IV Curve")
+    plt.xlabel("Strike Price")
+    plt.ylabel("Implied Volatility")
+    plt.title("Implied Volatility vs Strike Price")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+def plot_trade_decisions(history):
+    df = pd.DataFrame(history)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(df["timestamp"], df["mispricing"], label="IV Mispricing")
+
+    buys = df[df["decision"] == "buy"]
+    sells = df[df["decision"] == "sell"]
+
+    plt.scatter(buys["timestamp"], buys["mispricing"], color="green", label="Buy", marker="^")
+    plt.scatter(sells["timestamp"], sells["mispricing"], color="red", label="Sell", marker="v")
+
+    plt.axhline(y=0, color="gray", linestyle="--")
+    plt.axhline(y=0.005, color="orange", linestyle="--", label="+tau")
+    plt.axhline(y=-0.005, color="orange", linestyle="--", label="-tau")
+
+    plt.xlabel("Timestamp")
+    plt.ylabel("IV Mispricing")
+    plt.title(f"IV Mispricing and Trade Decisions for {df['symbol'].iloc[0]}")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 
 
 class VolcanicVoucherStrategy(Strategy):
@@ -762,40 +789,56 @@ class VolcanicVoucherStrategy(Strategy):
         """
         super().__init__(symbol, limit)
         self.strike_price = strike_price
-        self.tau = 0.02     # threshold for mispricing
-        self.size = int(0.25 * limit)  # trade size
+        self.tau = 0.006 # threshold for mispricing
+        self.size = int(0.5 * limit)  # trade size
+        self.history = []  # for plotting
 
     def act(self, state: TradingState, common_data: Dict[str, Any] = None) -> None:
-        # Use common data computed once per tick.
-        if common_data is None or not common_data:
-            return
-        # common_data includes underlying_price, voucher_data, regression_coeffs, and base_iv.
-        voucher_data = common_data.get("voucher_data", {})
-        coeffs = common_data.get("regression_coeffs", None)
-        if coeffs is None:
+        if not common_data or "spot_price" not in common_data or "iv_curve" not in common_data:
             return
 
-        # For our strategy, check if data for self.symbol is available.
-        if self.symbol not in voucher_data:
+        spot = common_data["spot_price"]
+        TTE = common_data["TTE"]
+        a, b, c = common_data["iv_curve"]
+
+        # Get mid price of this voucher
+        order_depth = state.order_depths.get(self.symbol)
+        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
             return
 
-        # Retrieve the current mid-price, normalized moneyness and calculated iv for this voucher.
-        data = voucher_data[self.symbol]
-        m = data["m"]
-        iv = data["iv"]
-        mid_price = data["mid_price"]
-        # Compute the fitted iv at m using the regression coefficients.
-        fitted_iv = coeffs[0] * (m**2) + coeffs[1] * m + coeffs[2]
-        residual = iv - fitted_iv
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        mid_price = (best_bid + best_ask) / 2
 
-        # If mispricing exceeds the threshold, issue an order.
-        if abs(residual) > self.tau:
-            # For a positive residual, the voucher appears overpriced: short it.
-            if residual > 0:
-                self.sell(round(mid_price), self.size)
-            else:
-                # For a negative residual, it appears underpriced: buy.
-                self.buy(round(mid_price), self.size)
+        # Compute m and actual implied volatility
+        m = math.log(self.strike_price / spot) / math.sqrt(TTE)
+        iv_actual = BlackScholes.implied_volatility(mid_price, spot, self.strike_price, TTE)
+
+        if math.isnan(iv_actual) or math.isinf(iv_actual):
+            return
+
+        # Compute fitted volatility and mispricing
+        iv_fit = a * m**2 + b * m + c
+        mispricing = iv_actual - iv_fit
+
+        position = state.position.get(self.symbol, 0)
+        # Save all decision info
+        self.history.append({
+            "timestamp": state.timestamp,
+            "symbol": self.symbol,
+            "m": m,
+            "iv_actual": iv_actual,
+            "iv_fit": iv_fit,
+            "mispricing": mispricing,
+            "decision": "buy" if mispricing < -self.tau else "sell" if mispricing > self.tau else "none",
+        })
+
+        if mispricing < -self.tau and position < self.limit:
+            # Undervalued => Buy
+            self.buy(best_ask, min(self.size, self.limit - position))
+        elif mispricing > self.tau and position > -self.limit:
+            # Overvalued => Sell
+            self.sell(best_bid, min(self.size, self.limit + position))
 
     def run(self, state: TradingState, common_data: Dict[str, Any] = None) -> List[Order]:
         self.orders = []
@@ -897,6 +940,8 @@ class Trader:
 
         # Compute common voucher data once per tick for voucher strategies.
         common_data = compute_voucher_common_data(state)
+        
+
 
         for key, strategy in self.strategies.items():
             if key in old_trader_data:
@@ -912,7 +957,14 @@ class Trader:
                 orders.update(result)
 
             new_trader_data[key] = strategy.save()
-
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, orders, conversions, trader_data)
+        all_history = []
+        for key, strategy in self.strategies.items():
+            if isinstance(strategy, VolcanicVoucherStrategy):
+                all_history.extend(strategy.history)
+
+        plot_trade_decisions(all_history)
+
+
         return orders, conversions, trader_data
