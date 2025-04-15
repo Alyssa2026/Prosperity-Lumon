@@ -661,142 +661,152 @@ CURRENT_ROUND = 3
 from math import log, sqrt, exp
 from statistics import NormalDist
 
-
+import math
+from math import log, sqrt, exp
 from collections import deque
+import numpy as np
+import pandas as pd
+from scipy import stats, optimize
+from datamodel import Order, TradingState, Symbol
+from collections import deque
+TTE = 5.0  # Assume Time-To-Expiry in days
 
-class VolcanicVoucherStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int, strike_price: int) -> None:
-        super().__init__(symbol, limit)
-        self.strike_price = strike_price
-        self.r = 0
-        self.threshold_entry = 1.0  # instead of 1.5
-        self.threshold_exit = 0.2   # instead of 0.3
-        self.vol_window = deque(maxlen=20)
-        self.prev_sigma = 0.17
-        self.window = 20  # rolling window for z-score
-        self.size = int(0.25 * limit)  # always trade full position
-        self.cash = 0
-        self.position = 0
+# --- Black-Scholes Helper Functions ---
 
-    def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
+def bs_call_price(S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float:
+    d1 = (math.log(S / K) + 0.5 * sigma**2 * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return S * stats.norm.cdf(d1) - K * math.exp(-r * T) * stats.norm.cdf(d2)
+
+def implied_vol(S: float, K: float, T: float, market_price: float, r: float = 0.0) -> float:
+    def f(sigma: float) -> float:
+        return bs_call_price(S, K, T, sigma, r) - market_price
+    try:
+        vol = optimize.brentq(f, 1e-6, 5.0)
+    except Exception:
+        vol = float('nan')
+    return vol
+
+# --- Common Data Calculation for Voucher Strategies ---
+def compute_voucher_common_data(state: TradingState) -> Dict[str, Any]:
+    """
+    Compute common voucher data once per tick:
+      - Underlying mid price from "VOLCANIC_ROCK"
+      - For each voucher, retrieve mid price, compute normalized moneyness m and implied volatility iv.
+      - Fit quadratic regression to the (m, iv) data across all vouchers.
+    Returns a dictionary with:
+      underlying_price, a dict mapping voucher symbol -> (m, iv, mid_price),
+      regression coefficients, and base_iv.
+    """
+    # Get underlying mid-price
+    def get_mid_price(symbol: str) -> float | None:
         order_depth = state.order_depths.get(symbol)
         if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
             return None
-        bid = max(order_depth.buy_orders)
-        ask = min(order_depth.sell_orders)
+        bid = max(order_depth.buy_orders.keys())
+        ask = min(order_depth.sell_orders.keys())
         return (bid + ask) / 2
 
-    @staticmethod
-    def BS_CALL(S, K, T, r, sigma):
-        if T <= 0 or sigma <= 0:
-            return max(0, S - K)
-        d1 = (log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt(T))
-        d2 = d1 - sigma * sqrt(T)
-        return S * NormalDist().cdf(d1) - K * exp(-r * T) * NormalDist().cdf(d2)
+    underlying_price = get_mid_price("VOLCANIC_ROCK")
+    if underlying_price is None:
+        return {}
 
-    @staticmethod
-    def implied_volatility(S, K, T, r, market_price, tol=1e-5, max_iter=100):
-        low, high = 0.01, 3.0
-        for _ in range(max_iter):
-            mid = (low + high) / 2
-            price = VolcanicVoucherStrategy.BS_CALL(S, K, T, r, mid)
-            if abs(price - market_price) < tol:
-                return mid
-            if price > market_price:
-                high = mid
+    # Define voucher instruments and strikes.
+    vouchers = [
+        ("VOLCANIC_ROCK_VOUCHER_9500", 9500),
+        ("VOLCANIC_ROCK_VOUCHER_9750", 9750),
+        ("VOLCANIC_ROCK_VOUCHER_10000", 10000),
+        ("VOLCANIC_ROCK_VOUCHER_10250", 10250),
+        ("VOLCANIC_ROCK_VOUCHER_10500", 10500)
+    ]
+
+    common_voucher_data = {}  # Map voucher symbol -> (m, iv, mid_price)
+    m_vals = []
+    iv_vals = []
+    for sym, strike in vouchers:
+        price = get_mid_price(sym)
+        if price is None:
+            continue
+        # Normalize moneyness: m = ln(K / underlying_price) / sqrt(TTE)
+        m = log(strike / underlying_price) / sqrt(TTE)
+        # Compute implied volatility using voucher's mid-price.
+        iv = implied_vol(underlying_price, strike, TTE, price, r=0)
+        if math.isnan(iv):
+            continue
+        m_vals.append(m)
+        iv_vals.append(iv)
+        common_voucher_data[sym] = {"m": m, "iv": iv, "mid_price": price}
+    
+    # Only proceed if we have enough points.
+    if len(m_vals) < 3:
+        return {}
+
+    # Fit quadratic regression: iv(m) = a*m^2 + b*m + c, base_iv = c.
+    coeffs = np.polyfit(m_vals, iv_vals, 2)  # coefficients: [a, b, c]
+    base_iv = coeffs[2]
+
+    return {
+        "underlying_price": underlying_price,
+        "voucher_data": common_voucher_data,
+        "regression_coeffs": coeffs,
+        "base_iv": base_iv
+    }
+
+
+class VolcanicVoucherStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int, strike_price: int) -> None:
+        """
+        symbol: e.g. "VOLCANIC_ROCK_VOUCHER_10000"
+        limit: trading limit for this voucher.
+        strike_price: the strike price for this voucher.
+        """
+        super().__init__(symbol, limit)
+        self.strike_price = strike_price
+        self.tau = 0.02     # threshold for mispricing
+        self.size = int(0.25 * limit)  # trade size
+
+    def act(self, state: TradingState, common_data: Dict[str, Any] = None) -> None:
+        # Use common data computed once per tick.
+        if common_data is None or not common_data:
+            return
+        # common_data includes underlying_price, voucher_data, regression_coeffs, and base_iv.
+        voucher_data = common_data.get("voucher_data", {})
+        coeffs = common_data.get("regression_coeffs", None)
+        if coeffs is None:
+            return
+
+        # For our strategy, check if data for self.symbol is available.
+        if self.symbol not in voucher_data:
+            return
+
+        # Retrieve the current mid-price, normalized moneyness and calculated iv for this voucher.
+        data = voucher_data[self.symbol]
+        m = data["m"]
+        iv = data["iv"]
+        mid_price = data["mid_price"]
+        # Compute the fitted iv at m using the regression coefficients.
+        fitted_iv = coeffs[0] * (m**2) + coeffs[1] * m + coeffs[2]
+        residual = iv - fitted_iv
+
+        # If mispricing exceeds the threshold, issue an order.
+        if abs(residual) > self.tau:
+            # For a positive residual, the voucher appears overpriced: short it.
+            if residual > 0:
+                self.sell(round(mid_price), self.size)
             else:
-                low = mid
-        return mid
+                # For a negative residual, it appears underpriced: buy.
+                self.buy(round(mid_price), self.size)
 
-    @staticmethod
-    def average_implied_volatility(spot_price: float, voucher_prices: dict[str, float], T: float, r: float) -> float:
-        total_iv = 0
-        count = 0
-        for symbol, price in voucher_prices.items():
-            try:
-                strike = int(symbol.split('_')[-1])
-                iv = VolcanicVoucherStrategy.implied_volatility(spot_price, strike, T, r, price)
-                if not np.isnan(iv):
-                    total_iv += iv
-                    count += 1
-            except Exception:
-                continue
-        return total_iv / count if count > 0 else float('nan')
-
-    def act(self, state: TradingState) -> None:
-        voucher_price = self.get_mid_price(state, self.symbol)
-        rock_price = self.get_mid_price(state, "VOLCANIC_ROCK")
-        if voucher_price is None or rock_price is None:
-            return
-
-        fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
-        days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
-        T = days_to_expiry / 365
-
-        # Build voucher_prices dict for all 5 vouchers
-        voucher_prices_dict = {}
-        for strike in [9500, 9750, 10000, 10250, 10500]:
-            symbol = f"VOLCANIC_ROCK_VOUCHER_{strike}"
-            price = self.get_mid_price(state, symbol)
-            if price is not None:
-                voucher_prices_dict[symbol] = price
-
-        iv = self.average_implied_volatility(rock_price, voucher_prices_dict, T, self.r)
-        if np.isnan(iv):
-            return
-
-        self.vol_window.append(iv)
-        iv_series = pd.Series(self.vol_window)
-        mean = iv_series.rolling(window=self.window, min_periods=1).mean().iloc[-1]
-        std = iv_series.rolling(window=self.window, min_periods=1).std().iloc[-1]
-
-        if std == 0 or np.isnan(std):
-            return
-
-        z = (iv - mean) / std
-
-        orders = []
-
-        if z < -2 and self.position == 0: # messed around with these values
-            qty = self.size
-            self.cash -= qty * voucher_price
-            self.position += qty
-            orders.append(Order(self.symbol, round(voucher_price), qty))
-
-        elif z > 2 and self.position == 0:
-            qty = -self.size
-            self.cash -= qty * voucher_price
-            self.position += qty
-            orders.append(Order(self.symbol, round(voucher_price), qty))
-
-        elif abs(z) < self.threshold_exit and self.position != 0:
-            qty = -self.position
-            self.cash -= qty * voucher_price
-            self.position = 0
-            orders.append(Order(self.symbol, round(voucher_price), qty))
-
-        self.prev_sigma = iv
-        self.last_orders = orders
-
-    def run(self, state: TradingState) -> list[Order]:
-        self.last_orders = []
-        self.act(state)
-        return self.last_orders
+    def run(self, state: TradingState, common_data: Dict[str, Any] = None) -> List[Order]:
+        self.orders = []
+        self.act(state, common_data)
+        return self.orders
 
     def save(self) -> JSON:
-        return {
-            "prev_sigma": self.prev_sigma,
-            "vol_window": list(self.vol_window),
-            "cash": self.cash,
-            "position": self.position
-        }
+        return {}
 
     def load(self, data: JSON) -> None:
-        if data:
-            self.prev_sigma = data.get("prev_sigma", 0.17)
-            self.cash = data.get("cash", 0)
-            self.position = data.get("position", 0)
-            self.vol_window = deque(data.get("vol_window", []), maxlen=10)
+        pass
 
 
 
@@ -870,15 +880,12 @@ class Trader:
             std=0.0032  ,       # Update to reflect the measured standard deviation.
             order_size=20         # Adjust order size based on trade frequency and liquidity.
         ), 
-        
-
+        "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9500", limits["VOLCANIC_ROCK_VOUCHER_9500"], 9500),
+        "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9750", limits["VOLCANIC_ROCK_VOUCHER_9750"], 9750),
+        "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10000", limits["VOLCANIC_ROCK_VOUCHER_10000"], 10000),
+        "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10250", limits["VOLCANIC_ROCK_VOUCHER_10250"], 10250),
+        "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10500", limits["VOLCANIC_ROCK_VOUCHER_10500"], 10500),
         }
-
-    # Add vouchers separately with initial expiry of 7
-        #for strike in [9500, 9750, 10000, 10250, 10500]:
-        for strike in  [9500, 9750, 10000, 10250, 10500]:
-            symbol = f"VOLCANIC_ROCK_VOUCHER_{strike}"
-            self.strategies[symbol] = VolcanicVoucherStrategy(symbol, limits[symbol], strike_price=strike)
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
         logger.print(state.position)
@@ -888,10 +895,17 @@ class Trader:
         new_trader_data = {}
         orders: Dict[str, List[Order]] = {}
 
+        # Compute common voucher data once per tick for voucher strategies.
+        common_data = compute_voucher_common_data(state)
+
         for key, strategy in self.strategies.items():
             if key in old_trader_data:
                 strategy.load(old_trader_data[key])
-            result = strategy.run(state)
+            # If the strategy is a voucher strategy, call run with common_data
+            if isinstance(strategy, VolcanicVoucherStrategy):
+                result = strategy.run(state, common_data)
+            else:
+                result = strategy.run(state)
             if isinstance(result, list):  # single-symbol strategy
                 orders[strategy.symbol] = result
             elif isinstance(result, dict):  # multi-symbol strategy
