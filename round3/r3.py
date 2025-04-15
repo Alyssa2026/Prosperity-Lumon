@@ -589,14 +589,44 @@ def BS_CALL(S: float, K: float, T: float, r: float, sigma: float) -> float:
     d2 = d1 - sigma * math.sqrt(T)
     return S * N(d1) - K * math.exp(-r*T) * N(d2)
 
+EXPIRY_DAY = 7
+CURRENT_ROUND = 3
+
+from math import log, sqrt, exp
+from statistics import NormalDist
+
+def BS_CALL(S, K, T, r, sigma):
+    if T <= 0 or sigma <= 0:
+        return max(0, S - K)
+    d1 = (log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt(T))
+    d2 = d1 - sigma * sqrt(T)
+    return S * NormalDist().cdf(d1) - K * exp(-r * T) * NormalDist().cdf(d2)
+
+def implied_volatility(S, K, T, r, market_price, tol=1e-5, max_iter=100):
+    # Use binary search for IV between 0.01 and 3.0
+    low, high = 0.01, 3.0
+    for _ in range(max_iter):
+        mid = (low + high) / 2
+        price = BS_CALL(S, K, T, r, mid)
+        if abs(price - market_price) < tol:
+            return mid
+        if price > market_price:
+            high = mid
+        else:
+            low = mid
+    return mid
+
+
+from collections import deque
+
 class VolcanicVoucherStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int, strike_price: int, expiry_days: int) -> None:
+    def __init__(self, symbol: str, limit: int, strike_price: int) -> None:
         super().__init__(symbol, limit)
         self.strike_price = strike_price
-        self.expiry_days = expiry_days
-        self.r = 0  # risk-free rate assumed 0
-        self.sigma = 0.15  # initial guess for volatility
-        self.threshold = 2  # minimum price difference for action
+        self.r = 0
+        self.threshold = 2
+        self.vol_window = deque(maxlen=25)  # rolling window of IVs
+        self.prev_sigma = 0.17
 
     def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
         order_depth = state.order_depths.get(symbol)
@@ -607,45 +637,60 @@ class VolcanicVoucherStrategy(Strategy):
         return (bid + ask) / 2
 
     def act(self, state: TradingState) -> None:
-        # Get mid prices
         voucher_price = self.get_mid_price(state, self.symbol)
         rock_price = self.get_mid_price(state, "VOLCANIC_ROCK")
-
         if voucher_price is None or rock_price is None:
             return
 
-        T = self.expiry_days / 365  # Time to expiration in years
-        fair_value = BS_CALL(S=rock_price, K=self.strike_price, T=T, r=self.r, sigma=self.sigma)
+        fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
+        days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
+        T = days_to_expiry / 365
 
+        # === Step 1: Price current voucher using average volatility
+        fair_value = BS_CALL(S=rock_price, K=self.strike_price, T=T, r=self.r, sigma=self.prev_sigma)
+        logger.print("FAIR VALUE: ", round(fair_value))
+        logger.print("MARKET VALUE: ", round(voucher_price))
+        logger.print("PERFECTLY PRICED" if abs(round(fair_value) - round(voucher_price)) <= 2 else "MISPRICED")
+
+        # === Step 2: Trade on mispricing
         position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
 
-        # If overvalued → short
         if voucher_price > fair_value + self.threshold:
             to_sell = self.limit + position
             for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                qty = min(volume, to_sell)
-                self.sell(price, qty)
-                to_sell -= qty
-                if to_sell <= 0:
-                    break
-
-        # If undervalued → long
+                if price >= fair_value + self.threshold:
+                    qty = min(volume, to_sell)
+                    self.sell(price, qty)
+                    to_sell -= qty
+                    if to_sell <= 0:
+                        break
         elif voucher_price < fair_value - self.threshold:
             to_buy = self.limit - position
             for price, volume in sorted(order_depth.sell_orders.items()):
-                qty = min(-volume, to_buy)
-                self.buy(price, qty)
-                to_buy -= qty
-                if to_buy <= 0:
-                    break
+                if price <= fair_value - self.threshold:
+                    qty = min(-volume, to_buy)
+                    self.buy(price, qty)
+                    to_buy -= qty
+                    if to_buy <= 0:
+                        break
+
+        # === Step 3: Update implied volatility estimate from market price
+        iv = implied_volatility(S=rock_price, K=self.strike_price, T=T, r=self.r, market_price=voucher_price)
+        self.vol_window.append(iv)
+        self.prev_sigma = sum(self.vol_window) / len(self.vol_window)
 
     def save(self) -> JSON:
-        return {"expiry_days": self.expiry_days}
+        return {
+            "prev_sigma": self.prev_sigma,
+            "vol_window": list(self.vol_window),
+        }
 
     def load(self, data: JSON) -> None:
         if data:
-            self.expiry_days = data.get("expiry_days", self.expiry_days)
+            self.prev_sigma = data.get("prev_sigma", 0.17)
+            self.vol_window = deque(data.get("vol_window", []), maxlen=10)
+
 
 
                 
@@ -679,7 +724,7 @@ class Trader:
             "PICNIC_BASKET2": 0,
             "VOLCANIC_ROCK": 0,
             "VOLCANIC_ROCK_VOUCHER_9500": 0,
-            "VOLCANIC_ROCK_VOUCHER_9750": 0,
+            "VOLCANIC_ROCK_VOUCHER_9750": 200,
             "VOLCANIC_ROCK_VOUCHER_10000": 0,
             "VOLCANIC_ROCK_VOUCHER_10250": 0,
             "VOLCANIC_ROCK_VOUCHER_10500": 0,
@@ -720,9 +765,10 @@ class Trader:
         }
 
     # Add vouchers separately with initial expiry of 7
-        for strike in [9500, 9750, 10000, 10250, 10500]:
+        #for strike in [9500, 9750, 10000, 10250, 10500]:
+        for strike in [9750]:
             symbol = f"VOLCANIC_ROCK_VOUCHER_{strike}"
-            self.strategies[symbol] = VolcanicVoucherStrategy(symbol, 200, strike_price=strike, expiry_days=7)
+            self.strategies[symbol] = VolcanicVoucherStrategy(symbol, limits[symbol], strike_price=strike)
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
         logger.print(state.position)
@@ -735,14 +781,7 @@ class Trader:
         for key, strategy in self.strategies.items():
             if key in old_trader_data:
                 strategy.load(old_trader_data[key])
-
-            # ⬇️ Decrement expiry_days by 1 if this is a volcanic voucher strategy
-            if isinstance(strategy, VolcanicVoucherStrategy):
-                if strategy.expiry_days > 0:
-                    strategy.expiry_days -= 1
-
             result = strategy.run(state)
-
             if isinstance(result, list):  # single-symbol strategy
                 orders[strategy.symbol] = result
             elif isinstance(result, dict):  # multi-symbol strategy
