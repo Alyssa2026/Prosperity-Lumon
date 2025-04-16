@@ -656,7 +656,7 @@ def compute_mid_price(order_depth: OrderDepth) -> float | None:
     return (best_bid + best_ask) / 2
 
 EXPIRY_DAY = 8
-CURRENT_ROUND = 2
+CURRENT_ROUND = 3
 
 import math
 from statistics import NormalDist
