@@ -676,12 +676,33 @@ def bs_call_price(S: float, K: float, T: float, sigma: float, r: float = 0.0) ->
     d2 = d1 - sigma * math.sqrt(T)
     return S * NormalDist().cdf(d1) - K * math.exp(-r * T) * NormalDist().cdf(d2)
 
-def implied_volatility(S: float, K: float, T: float, market_price: float) -> float:
-    from scipy.optimize import brentq
-    try:
-        return brentq(lambda sigma: bs_call_price(S, K, T, sigma) - market_price, 1e-5, 5)
-    except ValueError:
+def implied_volatility_bisection(S: float, K: float, T: float, market_price: float, tol: float = 1e-8, max_iter: int = 1000) -> float:
+    # Define the objective: difference between theoretical and market prices.
+    def objective(sigma):
+        return bs_call_price(S, K, T, sigma) - market_price
+
+    # Set the lower and upper bounds for sigma.
+    lower, upper = 1e-5, 5.0
+    
+    # Ensure there is a sign change between the endpoints.
+    if objective(lower) * objective(upper) > 0:
+        # If not, return NaN to indicate that no root was bracketed.
         return float("nan")
+    
+    for _ in range(max_iter):
+        mid = (lower + upper) / 2.0
+        diff = objective(mid)
+        # Check if the mid-value gives a sufficiently small error.
+        if abs(diff) < tol:
+            return mid
+        # Narrow the interval where the sign change occurs.
+        if objective(lower) * diff < 0:
+            upper = mid
+        else:
+            lower = mid
+            
+    # If maximum iterations reached, return the midpoint as the best approximation.
+    return (lower + upper) / 2.0
 
 def iv_theory(m: float) -> float:
     return A * m**2 + B * m + C
@@ -761,7 +782,7 @@ class VolcanicVoucherStrategy(Strategy):
         theory_iv = iv_theory(m)
 
         # Compute the actual IV from the voucher market mid price.
-        actual_iv = implied_volatility(underlying_mid_price, self.strike_price, TTE, mid_price)
+        actual_iv = implied_volatility_bisection(underlying_mid_price, self.strike_price, TTE, mid_price)
         if math.isnan(actual_iv) or actual_iv <= 0:
             logger.print("NAN")
             return
