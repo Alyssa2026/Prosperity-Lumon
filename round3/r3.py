@@ -3,18 +3,12 @@ from abc import abstractmethod
 from collections import deque
 from math import log, sqrt, exp
 from statistics import NormalDist
-from matplotlib.pylab import norm
 import numpy as np
-import pandas as pd
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 from typing import Any, Dict, List, TypeAlias
 from statistics import NormalDist
-import math
 from math import log, sqrt, exp
 from collections import deque
-import numpy as np
-import pandas as pd
-from scipy import stats, optimize
 from datamodel import Order, TradingState, Symbol
 from collections import deque
 
@@ -661,7 +655,7 @@ def compute_mid_price(order_depth: OrderDepth) -> float | None:
     best_ask = min(order_depth.sell_orders.keys())
     return (best_bid + best_ask) / 2
 
-EXPIRY_DAY = 7
+EXPIRY_DAY = 8
 CURRENT_ROUND = 3
 
 def compute_voucher_common_data(state: TradingState) -> Dict[str, Any]:
@@ -683,10 +677,7 @@ def compute_voucher_common_data(state: TradingState) -> Dict[str, Any]:
     fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
     days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
     TTE = days_to_expiry / 365
-    # current_round = state.timestamp // 100
-    # EXPIRY_DAY = 7
-    # TTE = max(0.5, EXPIRY_DAY - current_round)  # Ensure non-zero time to expiry
-
+   
     m_iv_pairs = []
 
     for symbol, strike in vouchers:
@@ -719,65 +710,6 @@ def compute_voucher_common_data(state: TradingState) -> Dict[str, Any]:
         "m_iv_pairs": m_iv_pairs  # Optional, good for debugging
     }
 
-    
-import matplotlib.pyplot as plt
-
-def plot_iv_vs_strike(common_data):
-    if not common_data or "m_iv_pairs" not in common_data:
-        print("No IV data to plot.")
-        return
-
-    m_iv = common_data["m_iv_pairs"]
-    spot = common_data["spot_price"]
-    TTE = common_data["TTE"]
-    a, b, c = common_data["iv_curve"]
-
-    # Convert m back to strike prices to match m = log(K/S)/sqrt(TTE)
-    strikes = [spot * math.exp(m * math.sqrt(TTE)) for m, _ in m_iv]
-    ivs = [v for _, v in m_iv]
-
-    # Sort for cleaner plotting
-    combined = sorted(zip(strikes, ivs), key=lambda x: x[0])
-    strikes_sorted, ivs_sorted = zip(*combined)
-
-    # Generate smooth m values for fitted curve
-    m_vals = np.linspace(min(m for m, _ in m_iv), max(m for m, _ in m_iv), 100)
-    fitted_ivs = [a * m**2 + b * m + c for m in m_vals]
-    fitted_strikes = [spot * math.exp(m * math.sqrt(TTE)) for m in m_vals]
-
-    plt.figure(figsize=(10, 5))
-    plt.plot(strikes_sorted, ivs_sorted, 'o', label="Actual Implied Vols")
-    plt.plot(fitted_strikes, fitted_ivs, '--', label="Fitted IV Curve")
-    plt.xlabel("Strike Price")
-    plt.ylabel("Implied Volatility")
-    plt.title("Implied Volatility vs Strike Price")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
-def plot_trade_decisions(history):
-    df = pd.DataFrame(history)
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(df["timestamp"], df["mispricing"], label="IV Mispricing")
-
-    buys = df[df["decision"] == "buy"]
-    sells = df[df["decision"] == "sell"]
-
-    plt.scatter(buys["timestamp"], buys["mispricing"], color="green", label="Buy", marker="^")
-    plt.scatter(sells["timestamp"], sells["mispricing"], color="red", label="Sell", marker="v")
-
-    plt.axhline(y=0, color="gray", linestyle="--")
-    plt.axhline(y=0.005, color="orange", linestyle="--", label="+tau")
-    plt.axhline(y=-0.005, color="orange", linestyle="--", label="-tau")
-
-    plt.xlabel("Timestamp")
-    plt.ylabel("IV Mispricing")
-    plt.title(f"IV Mispricing and Trade Decisions for {df['symbol'].iloc[0]}")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
 
 
 class VolcanicVoucherStrategy(Strategy):
@@ -823,16 +755,7 @@ class VolcanicVoucherStrategy(Strategy):
 
         position = state.position.get(self.symbol, 0)
         # Save all decision info
-        self.history.append({
-            "timestamp": state.timestamp,
-            "symbol": self.symbol,
-            "m": m,
-            "iv_actual": iv_actual,
-            "iv_fit": iv_fit,
-            "mispricing": mispricing,
-            "decision": "buy" if mispricing < -self.tau else "sell" if mispricing > self.tau else "none",
-        })
-
+    
         if mispricing < -self.tau and position < self.limit:
             # Undervalued => Buy
             self.buy(best_ask, min(self.size, self.limit - position))
@@ -860,38 +783,23 @@ class VolcanicVoucherStrategy(Strategy):
 # Modified Trader that integrates the pairs strategy.
 class Trader:
     def __init__(self) -> None:
-        # limits = {
-        #     "KELP": 50,
-        #     "RAINFOREST_RESIN": 50,
-        #     "SQUID_INK": 50,
-        #     "CROISSANTS": 250,
-        #     "JAMS": 350,
-        #     "DJEMBES": 60,
-        #     "PICNIC_BASKET1": 60,
-        #     "PICNIC_BASKET2": 100,
-        #     "VOLCANIC_ROCK": 400,
-        #     "VOLCANIC_ROCK_VOUCHER_9500": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_9750": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_10000": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_10250": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_10500": 200
-        # }
         limits = {
-            "KELP": 0,
-            "RAINFOREST_RESIN": 0,
-            "SQUID_INK": 0,
-            "CROISSANTS": 0,
-            "JAMS": 0,
-            "DJEMBES": 0,
-            "PICNIC_BASKET1": 0,
-            "PICNIC_BASKET2": 0,
-            "VOLCANIC_ROCK": 0,
+            "KELP": 50,
+            "RAINFOREST_RESIN": 50,
+            "SQUID_INK": 50,
+            "CROISSANTS": 250,
+            "JAMS": 350,
+            "DJEMBES": 60,
+            "PICNIC_BASKET1": 60,
+            "PICNIC_BASKET2": 100,
+            "VOLCANIC_ROCK": 400,
             "VOLCANIC_ROCK_VOUCHER_9500": 200,
             "VOLCANIC_ROCK_VOUCHER_9750": 200,
             "VOLCANIC_ROCK_VOUCHER_10000": 200,
             "VOLCANIC_ROCK_VOUCHER_10250": 200,
-            "VOLCANIC_ROCK_VOUCHER_10500": 200,
+            "VOLCANIC_ROCK_VOUCHER_10500": 200
         }
+
         
         # Store individual strategies and, for croissants and jam, a combined pairs strategy.
         # Note: Remove the separate "CROISSANTS" and "JAMS" strategies since they are handled as a pair.
@@ -960,16 +868,6 @@ class Trader:
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, orders, conversions, trader_data)
         #  Plot only once — at the very end of the run
-        logger.print("hello ")
-        logger.print(69696969, state.timestamp )
-        if int(state.timestamp) >1000:  # modify ticks 
-            all_history = []
-            logger.print("are you getting freaky yet")
-            for key, strategy in self.strategies.items():
-                if isinstance(strategy, VolcanicVoucherStrategy):
-                    all_history.extend(strategy.history)
-            plot_trade_decisions(all_history)
-            plot_iv_vs_strike(compute_voucher_common_data(state))  # optional
-
+       
 
         return orders, conversions, trader_data
