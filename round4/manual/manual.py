@@ -158,7 +158,7 @@ def maximize3(grid_steps=20):
         (max_mult3, max_inhab1),
         float(max_val)
     )
-print("optimal two container")
+print("optimal third container")
 print(maximize3())
 
 #########################################################################################
