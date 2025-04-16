@@ -867,7 +867,7 @@ class Trader:
             "VOLCANIC_ROCK_VOUCHER_9500": 0,
             "VOLCANIC_ROCK_VOUCHER_9750": 0,
             "VOLCANIC_ROCK_VOUCHER_10000": 200,
-            "VOLCANIC_ROCK_VOUCHER_10250": 0,
+            "VOLCANIC_ROCK_VOUCHER_10250": 200,
             "VOLCANIC_ROCK_VOUCHER_10500": 0
         }
 
