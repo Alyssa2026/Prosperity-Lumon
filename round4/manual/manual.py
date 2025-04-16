@@ -121,7 +121,7 @@ def maximize3(grid_steps=20):
     """
     max_val = float('-inf')
     max_mult1 = max_mult2 = max_mult3 = None
-    max_inhab1 = max_inhab2 = max_inhab4 = None
+    max_inhab1 = max_inhab2 = max_inhab3 = None
 
     all_locations = [tuple(map(int, x)) for x in arr.reshape(-1, 2)]
 
@@ -155,11 +155,54 @@ def maximize3(grid_steps=20):
     return (
         (max_mult1, max_inhab1),
         (max_mult2, max_inhab2),
-        (max_mult3, max_inhab1),
+        (max_mult3, max_inhab3),
         float(max_val)
     )
 print("optimal third container")
 print(maximize3())
+
+#########################################################################################
+# EV
+#########################################################################################
+import numpy as np
+import pandas as pd
+from scipy.optimize import root_scalar
+
+# New container group: (multiplier, inhabitants)
+data = np.array([
+    (80, 6), (50, 4), (83, 7), (31, 2), (60, 4),
+    (89, 8), (10, 1), (37, 3), (70, 4), (90, 10),
+    (17, 1), (40, 3), (73, 4), (100, 15), (20, 2),
+    (41, 3), (79, 5), (23, 2), (47, 3), (30, 2)
+])
+
+M = data[:, 0]
+H = data[:, 1]
+
+def share_sum(K):
+    shares = (M / K - H) / 100
+    return np.sum(shares) - 1
+
+result = root_scalar(share_sum, bracket=[0.01, 10000], method='brentq')
+
+if result.converged:
+    K = result.root
+    shares = (M / K - H) / 100
+    actual_payoff = 10000 * K
+
+    print(f"\nEqualized Expected Payoff Multiplier (K): {K:.4f}")
+    print(f"Final Actual Payoff from any container: {actual_payoff:.2f}\n")
+
+    output = []
+    for i in range(len(M)):
+        payoff_val = 10000 * M[i] / (H[i] + 100 * shares[i])
+        output.append((i+1, shares[i], payoff_val))
+
+    df = pd.DataFrame(output, columns=["Container", "Share", "Payoff"])
+    print(df.to_string(index=False))
+else:
+    print("Failed to converge to a solution.")
+
 
 #########################################################################################
 # optimization using prior
