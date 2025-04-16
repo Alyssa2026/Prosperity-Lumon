@@ -1,15 +1,17 @@
 import json
 from abc import abstractmethod
-from collections import deque
-import statistics
 from math import log, sqrt, exp
+import math
 from statistics import NormalDist
-
 import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 from typing import Any, Dict, List, TypeAlias
 from statistics import NormalDist
-import math
+from math import log, sqrt, exp
+from collections import deque
+from datamodel import Order, TradingState, Symbol
+from collections import deque
+
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
@@ -73,6 +75,7 @@ class BlackScholes:
                 low_vol = volatility
             volatility = (low_vol + high_vol) / 2.0
         return volatility
+    
     
 class Logger:
     def __init__(self) -> None:
@@ -643,116 +646,136 @@ class DjembeRatioArbitrageStrategy(Strategy):
                     position += qty
                     if position >= 0:
                         break
-def BS_CALL(S: float, K: float, T: float, r: float, sigma: float) -> float:
-    """Black-Scholes Call Option Pricing"""
-    if T <= 0 or sigma == 0:
-        return max(0, S - K)
-    N = NormalDist().cdf
-    d1 = (math.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
-    return S * N(d1) - K * math.exp(-r*T) * N(d2)
 
-EXPIRY_DAY = 7
+
+def compute_mid_price(order_depth: OrderDepth) -> float | None:
+    if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+        return None
+    best_bid = max(order_depth.buy_orders.keys())
+    best_ask = min(order_depth.sell_orders.keys())
+    return (best_bid + best_ask) / 2
+
+EXPIRY_DAY = 8
 CURRENT_ROUND = 3
 
-from math import log, sqrt, exp
-from statistics import NormalDist
+def compute_voucher_common_data(state: TradingState) -> Dict[str, Any]:
+    vouchers = [
+        ("VOLCANIC_ROCK_VOUCHER_9500", 9500),
+        ("VOLCANIC_ROCK_VOUCHER_9750", 9750),
+        ("VOLCANIC_ROCK_VOUCHER_10000", 10000),
+        ("VOLCANIC_ROCK_VOUCHER_10250", 10250),
+        ("VOLCANIC_ROCK_VOUCHER_10500", 10500)
+    ]
 
-def BS_CALL(S, K, T, r, sigma):
-    if T <= 0 or sigma <= 0:
-        return max(0, S - K)
-    d1 = (log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt(T))
-    d2 = d1 - sigma * sqrt(T)
-    return S * NormalDist().cdf(d1) - K * exp(-r * T) * NormalDist().cdf(d2)
+    rock_symbol = "VOLCANIC_ROCK"
+    rock_depth = state.order_depths.get(rock_symbol)
+    spot_price = compute_mid_price(rock_depth)
+    if spot_price is None:
+        return {}
 
-def implied_volatility(S, K, T, r, market_price, tol=1e-5, max_iter=100):
-    # Use binary search for IV between 0.01 and 3.0
-    low, high = 0.01, 3.0
-    for _ in range(max_iter):
-        mid = (low + high) / 2
-        price = BS_CALL(S, K, T, r, mid)
-        if abs(price - market_price) < tol:
-            return mid
-        if price > market_price:
-            high = mid
-        else:
-            low = mid
-    return mid
+    # Convert timestamp to remaining trading days
+    fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
+    days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
+    TTE = days_to_expiry / 365
+   
+    m_iv_pairs = []
+
+    for symbol, strike in vouchers:
+        depth = state.order_depths.get(symbol)
+        voucher_price = compute_mid_price(depth)
+        if voucher_price is None:
+            continue
+
+        try:
+            m_t = math.log(strike / spot_price) / math.sqrt(TTE)
+            v_t = BlackScholes.implied_volatility(
+                voucher_price, spot_price, strike, TTE
+            )
+            if not math.isnan(v_t) and not math.isinf(v_t):
+                m_iv_pairs.append((m_t, v_t))
+        except:
+            continue
+
+    if len(m_iv_pairs) < 3:
+        return {}  # Not enough data for fitting
+
+    ms = np.array([m for m, _ in m_iv_pairs])
+    ivs = np.array([v for _, v in m_iv_pairs])
+    coeffs = np.polyfit(ms, ivs, 2)  # [a, b, c]
+
+    return {
+        "spot_price": spot_price,
+        "TTE": TTE,
+        "iv_curve": tuple(coeffs),
+        "m_iv_pairs": m_iv_pairs  # Optional, good for debugging
+    }
 
 
-from collections import deque
 
 class VolcanicVoucherStrategy(Strategy):
     def __init__(self, symbol: str, limit: int, strike_price: int) -> None:
+        """
+        symbol: e.g. "VOLCANIC_ROCK_VOUCHER_10000"
+        limit: trading limit for this voucher.
+        strike_price: the strike price for this voucher.
+        """
         super().__init__(symbol, limit)
         self.strike_price = strike_price
-        self.r = 0
-        self.threshold = 2
-        self.vol_window = deque(maxlen=25)  # rolling window of IVs
-        self.prev_sigma = 0.17
+        self.tau = 0.05 # threshold for mispricing
+        self.size = int(0.5 * limit)  # trade size
+        self.history = []  # for plotting
 
-    def get_mid_price(self, state: TradingState, symbol: str) -> float | None:
-        order_depth = state.order_depths.get(symbol)
-        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
-        bid = max(order_depth.buy_orders)
-        ask = min(order_depth.sell_orders)
-        return (bid + ask) / 2
-
-    def act(self, state: TradingState) -> None:
-        voucher_price = self.get_mid_price(state, self.symbol)
-        rock_price = self.get_mid_price(state, "VOLCANIC_ROCK")
-        if voucher_price is None or rock_price is None:
+    def act(self, state: TradingState, common_data: Dict[str, Any] = None) -> None:
+        if not common_data or "spot_price" not in common_data or "iv_curve" not in common_data:
             return
 
-        fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
-        days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
-        T = days_to_expiry / 365
+        spot = common_data["spot_price"]
+        TTE = common_data["TTE"]
+        a, b, c = common_data["iv_curve"]
 
-        # === Step 1: Price current voucher using average volatility
-        fair_value = BS_CALL(S=rock_price, K=self.strike_price, T=T, r=self.r, sigma=self.prev_sigma)
-        logger.print("FAIR VALUE: ", round(fair_value))
-        logger.print("MARKET VALUE: ", round(voucher_price))
-        logger.print("PERFECTLY PRICED" if abs(round(fair_value) - round(voucher_price)) <= 2 else "MISPRICED")
+        # Get mid price of this voucher
+        order_depth = state.order_depths.get(self.symbol)
+        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+            return
 
-        # === Step 2: Trade on mispricing
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        mid_price = (best_bid + best_ask) / 2
+
+        # Compute m and actual implied volatility
+        m = math.log(self.strike_price / spot) / math.sqrt(TTE)
+        iv_actual = BlackScholes.implied_volatility(mid_price, spot, self.strike_price, TTE)
+
+        if math.isnan(iv_actual) or math.isinf(iv_actual):
+            return
+
+        # Compute fitted volatility and mispricing
+        iv_fit = a * m**2 + b * m + c
+        mispricing = iv_actual - iv_fit
+
         position = state.position.get(self.symbol, 0)
-        order_depth = state.order_depths[self.symbol]
+        # Save all decision info
+    
+        if mispricing < -self.tau and position < self.limit:
+            # Undervalued => Buy
+            self.buy(best_ask, min(self.size, self.limit - position))
+        elif mispricing > self.tau and position > -self.limit:
+            # Overvalued => Sell
+            self.sell(best_bid, min(self.size, self.limit + position))
 
-        if voucher_price > fair_value + self.threshold:
-            to_sell = self.limit + position
-            for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                if price >= fair_value + self.threshold:
-                    qty = min(volume, to_sell)
-                    self.sell(price, qty)
-                    to_sell -= qty
-                    if to_sell <= 0:
-                        break
-        elif voucher_price < fair_value - self.threshold:
-            to_buy = self.limit - position
-            for price, volume in sorted(order_depth.sell_orders.items()):
-                if price <= fair_value - self.threshold:
-                    qty = min(-volume, to_buy)
-                    self.buy(price, qty)
-                    to_buy -= qty
-                    if to_buy <= 0:
-                        break
-
-        # === Step 3: Update implied volatility estimate from market price
-        iv = implied_volatility(S=rock_price, K=self.strike_price, T=T, r=self.r, market_price=voucher_price)
-        self.vol_window.append(iv)
-        self.prev_sigma = sum(self.vol_window) / len(self.vol_window)
+    def run(self, state: TradingState, common_data: Dict[str, Any] = None) -> List[Order]:
+        self.orders = []
+        self.act(state, common_data)
+        return self.orders
 
     def save(self) -> JSON:
-        return {
-            "prev_sigma": self.prev_sigma,
-            "vol_window": list(self.vol_window),
-        }
+        return {}
 
     def load(self, data: JSON) -> None:
-        if data:
-            self.prev_sigma = data.get("prev_sigma", 0.17)
-            self.vol_window = deque(data.get("vol_window", []), maxlen=10)
+        pass
+
+
+
 
 
 
@@ -760,38 +783,23 @@ class VolcanicVoucherStrategy(Strategy):
 # Modified Trader that integrates the pairs strategy.
 class Trader:
     def __init__(self) -> None:
-        # limits = {
-        #     "KELP": 50,
-        #     "RAINFOREST_RESIN": 50,
-        #     "SQUID_INK": 50,
-        #     "CROISSANTS": 250,
-        #     "JAMS": 350,
-        #     "DJEMBES": 60,
-        #     "PICNIC_BASKET1": 60,
-        #     "PICNIC_BASKET2": 100,
-        #     "VOLCANIC_ROCK": 400,
-        #     "VOLCANIC_ROCK_VOUCHER_9500": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_9750": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_10000": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_10250": 200,
-        #     "VOLCANIC_ROCK_VOUCHER_10500": 200
-        # }
         limits = {
-            "KELP": 0,
-            "RAINFOREST_RESIN": 0,
-            "SQUID_INK": 0,
-            "CROISSANTS": 0,
-            "JAMS": 0,
-            "DJEMBES": 0,
-            "PICNIC_BASKET1": 0,
-            "PICNIC_BASKET2": 0,
+            "KELP": 50,
+            "RAINFOREST_RESIN": 50,
+            "SQUID_INK": 50,
+            "CROISSANTS": 250,
+            "JAMS": 350,
+            "DJEMBES": 60,
+            "PICNIC_BASKET1": 60,
+            "PICNIC_BASKET2": 100,
             "VOLCANIC_ROCK": 0,
             "VOLCANIC_ROCK_VOUCHER_9500": 0,
-            "VOLCANIC_ROCK_VOUCHER_9750": 200,
+            "VOLCANIC_ROCK_VOUCHER_9750": 0,
             "VOLCANIC_ROCK_VOUCHER_10000": 0,
             "VOLCANIC_ROCK_VOUCHER_10250": 0,
-            "VOLCANIC_ROCK_VOUCHER_10500": 0,
+            "VOLCANIC_ROCK_VOUCHER_10500": 0
         }
+
         
         # Store individual strategies and, for croissants and jam, a combined pairs strategy.
         # Note: Remove the separate "CROISSANTS" and "JAMS" strategies since they are handled as a pair.
@@ -823,15 +831,12 @@ class Trader:
             std=0.0032  ,       # Update to reflect the measured standard deviation.
             order_size=20         # Adjust order size based on trade frequency and liquidity.
         ), 
-        
-
+        "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9500", limits["VOLCANIC_ROCK_VOUCHER_9500"], 9500),
+        "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9750", limits["VOLCANIC_ROCK_VOUCHER_9750"], 9750),
+        "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10000", limits["VOLCANIC_ROCK_VOUCHER_10000"], 10000),
+        "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10250", limits["VOLCANIC_ROCK_VOUCHER_10250"], 10250),
+        "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10500", limits["VOLCANIC_ROCK_VOUCHER_10500"], 10500),
         }
-
-    # Add vouchers separately with initial expiry of 7
-        #for strike in [9500, 9750, 10000, 10250, 10500]:
-        for strike in [9750]:
-            symbol = f"VOLCANIC_ROCK_VOUCHER_{strike}"
-            self.strategies[symbol] = VolcanicVoucherStrategy(symbol, limits[symbol], strike_price=strike)
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
         logger.print(state.position)
@@ -841,17 +846,28 @@ class Trader:
         new_trader_data = {}
         orders: Dict[str, List[Order]] = {}
 
+        # Compute common voucher data once per tick for voucher strategies.
+        common_data = compute_voucher_common_data(state)
+        
+
+
         for key, strategy in self.strategies.items():
             if key in old_trader_data:
                 strategy.load(old_trader_data[key])
-            result = strategy.run(state)
+            # If the strategy is a voucher strategy, call run with common_data
+            if isinstance(strategy, VolcanicVoucherStrategy):
+                result = strategy.run(state, common_data)
+            else:
+                result = strategy.run(state)
             if isinstance(result, list):  # single-symbol strategy
                 orders[strategy.symbol] = result
             elif isinstance(result, dict):  # multi-symbol strategy
                 orders.update(result)
 
             new_trader_data[key] = strategy.save()
-
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, orders, conversions, trader_data)
+        #  Plot only once — at the very end of the run
+       
+
         return orders, conversions, trader_data
