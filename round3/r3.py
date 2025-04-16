@@ -1,7 +1,7 @@
 import json
 from abc import abstractmethod
-from collections import deque
 from math import log, sqrt, exp
+import math
 from statistics import NormalDist
 import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
@@ -792,12 +792,12 @@ class Trader:
             "DJEMBES": 60,
             "PICNIC_BASKET1": 60,
             "PICNIC_BASKET2": 100,
-            "VOLCANIC_ROCK": 400,
-            "VOLCANIC_ROCK_VOUCHER_9500": 200,
-            "VOLCANIC_ROCK_VOUCHER_9750": 200,
-            "VOLCANIC_ROCK_VOUCHER_10000": 200,
-            "VOLCANIC_ROCK_VOUCHER_10250": 200,
-            "VOLCANIC_ROCK_VOUCHER_10500": 200
+            "VOLCANIC_ROCK": 0,
+            "VOLCANIC_ROCK_VOUCHER_9500": 0,
+            "VOLCANIC_ROCK_VOUCHER_9750": 0,
+            "VOLCANIC_ROCK_VOUCHER_10000": 0,
+            "VOLCANIC_ROCK_VOUCHER_10250": 0,
+            "VOLCANIC_ROCK_VOUCHER_10500": 0
         }
 
         
