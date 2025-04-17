@@ -895,10 +895,14 @@ BASKET_WEIGHTS = {
     Product.DJEMBES: 1,
 }
 
+from collections import deque
+
 class BasketTrader:
     def __init__(self, symbol: str, limit: int):
         self.symbol = symbol
         self.limit = limit
+        self.spread_history = deque(maxlen=100)  # For dynamic thresholding
+
 
     def get_synthetic_basket_order_depth(self, order_depths: Dict[str, OrderDepth]) -> OrderDepth:
         synthetic_depth = OrderDepth()
@@ -983,7 +987,21 @@ class BasketTrader:
         # --- Spread logic ---
         spread_buy = synthetic_bid - basket_ask  # We buy basket, sell synthetic
         spread_sell = basket_bid - synthetic_ask  # We sell basket, buy synthetic
-        threshold = 25  # Only trade if spread > this
+        # Add spread to history
+        if synthetic_bid and basket_ask:
+            self.spread_history.append(synthetic_bid - basket_ask)
+
+        # Default threshold fallback
+        default_threshold = 10
+
+        # Dynamic threshold using std deviation
+        if len(self.spread_history) >= 10:
+            spread_std = np.std(self.spread_history)
+            threshold = max(10, spread_std *1.2)  # Don't go too low
+        
+        else:
+            threshold = default_threshold
+       
 
         # --- Maximum allowed trade size per opportunity ---
         max_size = 5  # hard cap for safety
@@ -1051,6 +1069,7 @@ class BasketTrader2:
     def __init__(self, symbol: str, limit: int):
         self.symbol = symbol
         self.limit = limit
+        self.spread_history = deque(maxlen=100)  # For dynamic thresholding
     def get_synthetic_basket_order_depth(self, order_depths: Dict[str, OrderDepth]) -> OrderDepth:
         synthetic_depth = OrderDepth()
 
@@ -1134,7 +1153,24 @@ class BasketTrader2:
         # --- Spread logic ---
         spread_buy = synthetic_bid - basket_ask  # We buy basket, sell synthetic
         spread_sell = basket_bid - synthetic_ask  # We sell basket, buy synthetic
-        threshold = 40  # Only trade if spread > this
+     
+         # Add spread to history
+        if synthetic_bid and basket_ask:
+            self.spread_history.append(synthetic_bid - basket_ask)
+
+        # Default threshold fallback
+        default_threshold=40
+
+        # Dynamic threshold using std deviation
+        if len(self.spread_history) >= 10:
+            spread_std = np.std(self.spread_history)
+            logger.print("printin stdddd")
+            logger.print(spread_std)
+            threshold = max(30, spread_std *30)  # Don't go too low
+        
+        else:
+            threshold = default_threshold
+       
 
         # --- Maximum allowed trade size per opportunity ---
         max_size = 10  # hard cap for safety
