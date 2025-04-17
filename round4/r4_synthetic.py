@@ -899,6 +899,7 @@ class BasketTrader:
     def __init__(self, symbol: str, limit: int):
         self.symbol = symbol
         self.limit = limit
+
     def get_synthetic_basket_order_depth(self, order_depths: Dict[str, OrderDepth]) -> OrderDepth:
         synthetic_depth = OrderDepth()
 
@@ -1133,7 +1134,7 @@ class BasketTrader2:
         # --- Spread logic ---
         spread_buy = synthetic_bid - basket_ask  # We buy basket, sell synthetic
         spread_sell = basket_bid - synthetic_ask  # We sell basket, buy synthetic
-        threshold = 25  # Only trade if spread > this
+        threshold = 40  # Only trade if spread > this
 
         # --- Maximum allowed trade size per opportunity ---
         max_size = 10  # hard cap for safety
@@ -1211,32 +1212,9 @@ class Trader:
             "KELP": KelpStrategy("KELP", limits["KELP"]),
             "RAINFOREST_RESIN": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"]),
             "SQUID_INK": SquidInkStrategy("SQUID_INK", limits["SQUID_INK"]),
-            "DJEMBES": DjembeRatioArbitrageStrategy("DJEMBES", limits["DJEMBES"]),
-            # "PICNIC_BASKET1": BasketTrader(Product.PICNIC_BASKET1, limits["PICNIC_BASKET1"]),
-            # "PICNIC_BASKET2": BasketTrader2(Product2.PICNIC_BASKET2, limits["PICNIC_BASKET2"]),
-             "COMBINE_ONE": CombinedBasketStrategy(
-                "PICNIC_BASKET1", limits["PICNIC_BASKET1"],
-                {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
-                buy_z=0.7, sell_z=0.7, exit_z=0.2,
-                mean=48.76, std=85.91
-            ),
-            "COMBINE_TWO": CombinedBasketStrategy(
-                "PICNIC_BASKET2", limits["PICNIC_BASKET2"],
-                {"CROISSANTS": 4, "JAMS": 2},
-                buy_z=2.2, sell_z=0.9, exit_z=0.1,
-                mean=30.24, std=59.85
-            ),
-          "CROISSANTS_JAMS": PairsMarketMakingStrategy(
-            "CROISSANTS", "JAMS",
-            limits["CROISSANTS"],
-            limits["JAMS"],
-            buy_threshold=.6,        # Increase threshold if data indicates a larger move is required.
-            sell_threshold=1,       # Likewise for the sell threshold.
-            exit_threshold=0.15,      # Adjust exit threshold to match reversion characteristics.
-            mean=0.6519  ,          # Update to reflect the historical mean ratio.
-            std=0.0032  ,       # Update to reflect the measured standard deviation.
-            order_size=20         # Adjust order size based on trade frequency and liquidity.
-        ), 
+            "PICNIC_BASKET1": BasketTrader(Product.PICNIC_BASKET1, limits["PICNIC_BASKET1"]),
+            "PICNIC_BASKET2": BasketTrader2(Product2.PICNIC_BASKET2, limits["PICNIC_BASKET2"]),
+      
         "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10000", 
                                                                limits["VOLCANIC_ROCK_VOUCHER_10000"],
                                                                strike_price=10000,
