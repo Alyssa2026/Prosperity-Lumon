@@ -656,147 +656,218 @@ def compute_mid_price(order_depth: OrderDepth) -> float | None:
     return (best_bid + best_ask) / 2
 
 EXPIRY_DAY = 8
-CURRENT_ROUND = 3
+CURRENT_ROUND = 2
 
-def compute_voucher_common_data(state: TradingState) -> Dict[str, Any]:
-    vouchers = [
-        ("VOLCANIC_ROCK_VOUCHER_9500", 9500),
-        ("VOLCANIC_ROCK_VOUCHER_9750", 9750),
-        ("VOLCANIC_ROCK_VOUCHER_10000", 10000),
-        ("VOLCANIC_ROCK_VOUCHER_10250", 10250),
-        ("VOLCANIC_ROCK_VOUCHER_10500", 10500)
-    ]
+import math
+from statistics import NormalDist
+from datamodel import Order, TradingState, Symbol
+from typing import Any, Dict, List, TypeAlias
 
-    rock_symbol = "VOLCANIC_ROCK"
-    rock_depth = state.order_depths.get(rock_symbol)
-    spot_price = compute_mid_price(rock_depth)
-    if spot_price is None:
-        return {}
+# Hard-coded historical smile coefficients.
+A = 0.237290
+B = 0.002935
+C = 0.149196
 
-    # Convert timestamp to remaining trading days
-    fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
-    days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
-    TTE = days_to_expiry / 365
-   
-    m_iv_pairs = []
+# Helper functions.
+def bs_call_price(S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float:
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        return float("nan")
+    d1 = (math.log(S / K) + 0.5 * sigma**2 * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return S * NormalDist().cdf(d1) - K * math.exp(-r * T) * NormalDist().cdf(d2)
 
-    for symbol, strike in vouchers:
-        depth = state.order_depths.get(symbol)
-        voucher_price = compute_mid_price(depth)
-        if voucher_price is None:
-            continue
+def implied_volatility(S: float, K: float, T: float, market_price: float) -> float:
+    from scipy.optimize import brentq
+    try:
+        return brentq(lambda sigma: bs_call_price(S, K, T, sigma) - market_price, 1e-5, 5)
+    except ValueError:
+        return float("nan")
 
-        try:
-            m_t = math.log(strike / spot_price) / math.sqrt(TTE)
-            v_t = BlackScholes.implied_volatility(
-                voucher_price, spot_price, strike, TTE
-            )
-            if not math.isnan(v_t) and not math.isinf(v_t):
-                m_iv_pairs.append((m_t, v_t))
-        except:
-            continue
+def iv_theory(m: float) -> float:
+    return A * m**2 + B * m + C
 
-    if len(m_iv_pairs) < 3:
-        return {}  # Not enough data for fitting
-
-    ms = np.array([m for m, _ in m_iv_pairs])
-    ivs = np.array([v for _, v in m_iv_pairs])
-    coeffs = np.polyfit(ms, ivs, 2)  # [a, b, c]
-
-    return {
-        "spot_price": spot_price,
-        "TTE": TTE,
-        "iv_curve": tuple(coeffs),
-        "m_iv_pairs": m_iv_pairs  # Optional, good for debugging
-    }
-
-
-
+# -----------------------------------------------------------------------------
+# VolcanicVoucherStrategy: Implements our backtester logic as a live strategy.
+# -----------------------------------------------------------------------------
 class VolcanicVoucherStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int, strike_price: int) -> None:
+    def __init__(
+        self,
+        symbol: str,
+        limit: int,
+        strike_price: int,
+        buy_z: float,
+        sell_z: float,
+        exit_z: float,
+        hist_std: float,
+    ) -> None:
         """
-        symbol: e.g. "VOLCANIC_ROCK_VOUCHER_10000"
-        limit: trading limit for this voucher.
-        strike_price: the strike price for this voucher.
+        :param symbol: The voucher symbol, e.g., "VOLCANIC_ROCK_VOUCHER_10000"
+        :param limit: Total number of contracts to trade.
+        :param strike_price: The strike price (e.g., 10000).
+        :param expiry_days: Days remaining to expiry.
+        :param buy_z: Entry threshold for long (if z < -buy_z, enter long).
+        :param sell_z: Entry threshold for short (if z > sell_z, enter short).
+        :param exit_z: Exit threshold (for a long, exit if z becomes > -exit_z; for a short, exit if z becomes < exit_z).
         """
         super().__init__(symbol, limit)
         self.strike_price = strike_price
-        self.tau = 0.05 # threshold for mispricing
-        self.size = int(0.5 * limit)  # trade size
-        self.history = []  # for plotting
+        self.buy_z = buy_z
+        self.sell_z = sell_z
+        self.exit_z = exit_z
+        self.hist_std = hist_std
+        # Persistent variable to hold our current position.
+        self.position = 0
+        self.entry_price = 0.0
 
-    def act(self, state: TradingState, common_data: Dict[str, Any] = None) -> None:
-        if not common_data or "spot_price" not in common_data or "iv_curve" not in common_data:
-            return
-
-        spot = common_data["spot_price"]
-        TTE = common_data["TTE"]
-        a, b, c = common_data["iv_curve"]
-
-        # Get mid price of this voucher
+    def act(self, state: TradingState) -> None:
+        logger.print("WEINSIDE")
+        # Get the voucher's order depth from the state.
         order_depth = state.order_depths.get(self.symbol)
         if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
             return
-
+        
+        # Compute the market mid price from the order book (we assume bid_price_1 and ask_price_1 are used).
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
         mid_price = (best_bid + best_ask) / 2
 
-        # Compute m and actual implied volatility
-        m = math.log(self.strike_price / spot) / math.sqrt(TTE)
-        iv_actual = BlackScholes.implied_volatility(mid_price, spot, self.strike_price, TTE)
-
-        if math.isnan(iv_actual) or math.isinf(iv_actual):
+        # Get the underlying spot price for VOLCANIC_ROCK from observations.
+        underlying_order_depth = state.order_depths.get("VOLCANIC_ROCK")
+        if not underlying_order_depth or not underlying_order_depth.buy_orders or not underlying_order_depth.sell_orders:
+            return
+        
+        underlying_best_bid = max(underlying_order_depth.buy_orders.keys())
+        underlying_best_ask = min(underlying_order_depth.sell_orders.keys())
+        underlying_mid_price = (underlying_best_bid + underlying_best_ask) / 2
+        if underlying_best_bid is None:
             return
 
-        # Compute fitted volatility and mispricing
-        iv_fit = a * m**2 + b * m + c
-        mispricing = iv_actual - iv_fit
+        # Calculate time-to-expiry (in years).
+        # Compute fractional_day using the scaling factor (timestamp / 1_000_000)
+        fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
 
-        position = state.position.get(self.symbol, 0)
-        # Save all decision info
-    
-        if mispricing < -self.tau and position < self.limit:
-            # Undervalued => Buy
-            self.buy(best_ask, min(self.size, self.limit - position))
-        elif mispricing > self.tau and position > -self.limit:
-            # Overvalued => Sell
-            self.sell(best_bid, min(self.size, self.limit + position))
+        # Compute days_to_expiry (ensuring it's not negative)
+        days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
 
-    def run(self, state: TradingState, common_data: Dict[str, Any] = None) -> List[Order]:
-        self.orders = []
-        self.act(state, common_data)
-        return self.orders
+        # Compute TTE (time-to-expiry) in years.
+        TTE = days_to_expiry / 365.0
+        logger.print("days to exp", days_to_expiry)
+        # Compute moneyness: m = log(strike / spot) / sqrt(TTE)
+        try:
+
+            m = math.log(self.strike_price / underlying_mid_price) / math.sqrt(TTE)
+        except Exception:
+            logger.print("EXCEPTION")
+            return
+
+        # Compute theoretical IV from the fitted smile.
+        theory_iv = iv_theory(m)
+
+        # Compute the actual IV from the voucher market mid price.
+        actual_iv = implied_volatility(underlying_mid_price, self.strike_price, TTE, mid_price)
+        if math.isnan(actual_iv) or actual_iv <= 0:
+            logger.print("NAN")
+            return
+
+        # Compute the delta and z-score.
+        delta_iv = actual_iv - theory_iv
+        z = delta_iv / self.hist_std
+        
+        if self.position == 0:
+            logger.print("WEFLAT ZSCORE: ", z)
+            # We are flat. Check entry conditions.
+            if z < -self.buy_z:
+                # Entry for long. Desired quantity: self.limit.
+                executed = 0
+                # Sweep sell orders that are priced at or below mid_price.
+                asks = sorted([ (p, vol) for p, vol in order_depth.sell_orders.items() if p <= mid_price ])
+                for price, volume in asks:
+                    qty = min(self.limit - executed, volume)
+                    if qty > 0:
+                        self.buy(price, qty)
+                        executed += qty
+                    if executed >= self.limit:
+                        break
+                # If we did not fill our desired quantity, place a resting order at mid_price.
+                if executed < self.limit:
+                    self.buy(round(mid_price), self.limit - executed)
+                self.position = 1
+                self.entry_price = mid_price  # Record mid price as our reference.
+            elif z > self.sell_z:
+                # Entry for short. Desired quantity: self.limit.
+                executed = 0
+                bids = sorted([ (p, vol) for p, vol in order_depth.buy_orders.items() if p >= mid_price ], reverse=True)
+                for price, volume in bids:
+                    qty = min(self.limit - executed, volume)
+                    if qty > 0:
+                        self.sell(price, qty)
+                        executed += qty
+                    if executed >= self.limit:
+                        break
+                if executed < self.limit:
+                    self.sell(round(mid_price), self.limit - executed)
+                self.position = -1
+                self.entry_price = mid_price
+        else:
+            # We are in a position. Check exit conditions.
+            if self.position == 1 and z > -self.exit_z:
+                # Exit long: Sell all at current best bid.
+                self.sell(round(mid_price), self.limit)
+                self.position = 0
+                self.entry_price = 0.0
+            elif self.position == -1 and z < self.exit_z:
+                # Exit short: Buy all at current best ask.
+                self.buy(round(mid_price), self.limit)
+                self.position = 0
+                self.entry_price = 0.0
 
     def save(self) -> JSON:
-        return {}
+        return {
+            "strike_price": self.strike_price,
+            "position": self.position,
+            "entry_price": self.entry_price
+        }
 
     def load(self, data: JSON) -> None:
-        pass
+        self.strike_price = data.get("strike_price", self.strike_price)
+        self.position = data.get("position", 0)
+        self.entry_price = data.get("entry_price", 0.0)
 
-
-
-
-
-
-                
+     
 # Modified Trader that integrates the pairs strategy.
 class Trader:
     def __init__(self) -> None:
+        # limits = {
+        #     "KELP": 50,
+        #     "RAINFOREST_RESIN": 50,
+        #     "SQUID_INK": 50,
+        #     "CROISSANTS": 250,
+        #     "JAMS": 350,
+        #     "DJEMBES": 60,
+        #     "PICNIC_BASKET1": 60,
+        #     "PICNIC_BASKET2": 100,
+        #     "VOLCANIC_ROCK": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_9500": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_9750": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_10000": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_10250": 0,
+        #     "VOLCANIC_ROCK_VOUCHER_10500": 0
+        # }
+        
         limits = {
-            "KELP": 50,
-            "RAINFOREST_RESIN": 50,
-            "SQUID_INK": 50,
-            "CROISSANTS": 250,
-            "JAMS": 350,
-            "DJEMBES": 60,
-            "PICNIC_BASKET1": 60,
-            "PICNIC_BASKET2": 100,
+            "KELP": 0,
+            "RAINFOREST_RESIN": 0,
+            "SQUID_INK": 0,
+            "CROISSANTS": 0,
+            "JAMS": 0,
+            "DJEMBES": 0,
+            "PICNIC_BASKET1": 0,
+            "PICNIC_BASKET2": 0,
             "VOLCANIC_ROCK": 0,
             "VOLCANIC_ROCK_VOUCHER_9500": 0,
             "VOLCANIC_ROCK_VOUCHER_9750": 0,
-            "VOLCANIC_ROCK_VOUCHER_10000": 0,
-            "VOLCANIC_ROCK_VOUCHER_10250": 0,
+            "VOLCANIC_ROCK_VOUCHER_10000": 200,
+            "VOLCANIC_ROCK_VOUCHER_10250": 200,
             "VOLCANIC_ROCK_VOUCHER_10500": 0
         }
 
@@ -831,11 +902,13 @@ class Trader:
             std=0.0032  ,       # Update to reflect the measured standard deviation.
             order_size=20         # Adjust order size based on trade frequency and liquidity.
         ), 
-        "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9500", limits["VOLCANIC_ROCK_VOUCHER_9500"], 9500),
-        "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_9750", limits["VOLCANIC_ROCK_VOUCHER_9750"], 9750),
-        "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10000", limits["VOLCANIC_ROCK_VOUCHER_10000"], 10000),
-        "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10250", limits["VOLCANIC_ROCK_VOUCHER_10250"], 10250),
-        "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10500", limits["VOLCANIC_ROCK_VOUCHER_10500"], 10500),
+        "VOLCANIC_ROCK_VOUCHER_10000": VolcanicVoucherStrategy("VOLCANIC_ROCK_VOUCHER_10000", 
+                                                               limits["VOLCANIC_ROCK_VOUCHER_10000"],
+                                                               strike_price=10000,
+                                                               buy_z=1,
+                                                               sell_z=1,
+                                                               exit_z=0.2,
+                                                               hist_std=0.006110812702837127),
         }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
@@ -846,19 +919,12 @@ class Trader:
         new_trader_data = {}
         orders: Dict[str, List[Order]] = {}
 
-        # Compute common voucher data once per tick for voucher strategies.
-        common_data = compute_voucher_common_data(state)
-        
-
 
         for key, strategy in self.strategies.items():
             if key in old_trader_data:
                 strategy.load(old_trader_data[key])
-            # If the strategy is a voucher strategy, call run with common_data
-            if isinstance(strategy, VolcanicVoucherStrategy):
-                result = strategy.run(state, common_data)
-            else:
-                result = strategy.run(state)
+            result = strategy.run(state)
+            
             if isinstance(result, list):  # single-symbol strategy
                 orders[strategy.symbol] = result
             elif isinstance(result, dict):  # multi-symbol strategy
