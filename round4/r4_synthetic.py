@@ -3,6 +3,7 @@ from abc import abstractmethod
 from math import log, sqrt, exp
 import math
 from statistics import NormalDist
+import statistics
 import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 from typing import Any, Dict, List, TypeAlias
@@ -830,8 +831,358 @@ class VolcanicVoucherStrategy(Strategy):
             # Exit short: Buy all at current best ask.
             self.buy(round(mid_price), self.limit)
 
-     
+from collections import deque
+
+class MacaronStrategy(Strategy):
+    def __init__(self, symbol: Symbol, limit: int, conversion_limit: int) -> None:
+        super().__init__(symbol, limit)
+        self.conversion_limit = conversion_limit
+        self.sunlight_history = deque(maxlen=3)
+
+        # Position tracking
+        self.holding = False
+        self.hold_start = None
+        self.position_direction = None
+        self.current_hold_duration = 0
+
+        # Conversion tracking
+        self.conversion_request = 0
+
+        # Duration settings
+        self.min_duration = 3
+        self.max_duration = 10
+        self.scaling_factor = 20.0  # adjust for sensitivity
+
+
+    def act(self, state: TradingState) -> None:
+        pass
+    def run(self, state: TradingState) -> tuple[list[Order], int]:
+        self.orders = []
+        self.conversion_request = 0
+        self.act(state)
+        return self.orders, self.conversion_request
+
+    def save(self) -> JSON:
+        return {
+            "sunlight_history": list(self.sunlight_history),
+            "holding": self.holding,
+            "hold_start": self.hold_start,
+            "position_direction": self.position_direction,
+            "current_hold_duration": self.current_hold_duration,
+            "conversion_request": self.conversion_request
+        }
+
+    def load(self, data: JSON) -> None:
+        self.sunlight_history = deque(data.get("sunlight_history", []), maxlen=3)
+        self.holding = data.get("holding", False)
+        self.hold_start = data.get("hold_start", None)
+        self.position_direction = data.get("position_direction", None)
+        self.current_hold_duration = data.get("current_hold_duration", 0)
+        self.conversion_request = data.get("conversion_request", 0)
+
+
+
+class Product:
+    CROISSANTS = "CROISSANTS"
+    JAMS = "JAMS"
+    DJEMBES = "DJEMBES"
+    PICNIC_BASKET1 = "PICNIC_BASKET1"
+    SYNTHETIC = "SYNTHETIC"
+
+BASKET_WEIGHTS = {
+    Product.CROISSANTS: 6,
+    Product.JAMS: 3,
+    Product.DJEMBES: 1,
+}
+
+class BasketTrader:
+    def __init__(self, symbol: str, limit: int):
+        self.symbol = symbol
+        self.limit = limit
+    def get_synthetic_basket_order_depth(self, order_depths: Dict[str, OrderDepth]) -> OrderDepth:
+        synthetic_depth = OrderDepth()
+
+        croissants_bid = max(order_depths[Product.CROISSANTS].buy_orders.keys(), default=0)
+        croissants_ask = min(order_depths[Product.CROISSANTS].sell_orders.keys(), default=float("inf"))
+
+        jams_bid = max(order_depths[Product.JAMS].buy_orders.keys(), default=0)
+        jams_ask = min(order_depths[Product.JAMS].sell_orders.keys(), default=float("inf"))
+
+        djembes_bid = max(order_depths[Product.DJEMBES].buy_orders.keys(), default=0)
+        djembes_ask = min(order_depths[Product.DJEMBES].sell_orders.keys(), default=float("inf"))
+
+        implied_bid = croissants_bid * BASKET_WEIGHTS[Product.CROISSANTS] + \
+                       jams_bid * BASKET_WEIGHTS[Product.JAMS] + \
+                       djembes_bid * BASKET_WEIGHTS[Product.DJEMBES]
+
+        implied_ask = croissants_ask * BASKET_WEIGHTS[Product.CROISSANTS] + \
+                       jams_ask * BASKET_WEIGHTS[Product.JAMS] + \
+                       djembes_ask * BASKET_WEIGHTS[Product.DJEMBES]
+
+        if implied_bid > 0:
+            vol_bid = min(
+                order_depths[Product.CROISSANTS].buy_orders.get(croissants_bid, 0) // BASKET_WEIGHTS[Product.CROISSANTS],
+                order_depths[Product.JAMS].buy_orders.get(jams_bid, 0) // BASKET_WEIGHTS[Product.JAMS],
+                order_depths[Product.DJEMBES].buy_orders.get(djembes_bid, 0) // BASKET_WEIGHTS[Product.DJEMBES],
+            )
+            synthetic_depth.buy_orders[implied_bid] = vol_bid
+
+        if implied_ask < float("inf"):
+            vol_ask = min(
+                -order_depths[Product.CROISSANTS].sell_orders.get(croissants_ask, 0) // BASKET_WEIGHTS[Product.CROISSANTS],
+                -order_depths[Product.JAMS].sell_orders.get(jams_ask, 0) // BASKET_WEIGHTS[Product.JAMS],
+                -order_depths[Product.DJEMBES].sell_orders.get(djembes_ask, 0) // BASKET_WEIGHTS[Product.DJEMBES],
+            )
+            synthetic_depth.sell_orders[implied_ask] = -vol_ask
+        logger.print("synth")
+        logger.print(synthetic_depth.sell_orders)
+        return synthetic_depth
+
+    def convert_synthetic_basket_orders(self, synthetic_orders: List[Order], order_depths: Dict[str, OrderDepth]) -> Dict[str, List[Order]]:
+        component_orders = {
+            Product.CROISSANTS: [],
+            Product.JAMS: [],
+            Product.DJEMBES: [],
+        }
+
+        for order in synthetic_orders:
+            price = order.price
+            quantity = order.quantity
+
+            if quantity > 0:
+                croissant_price = min(order_depths[Product.CROISSANTS].sell_orders.keys())
+                jam_price = min(order_depths[Product.JAMS].sell_orders.keys())
+                djembe_price = min(order_depths[Product.DJEMBES].sell_orders.keys())
+            else:
+                croissant_price = max(order_depths[Product.CROISSANTS].buy_orders.keys())
+                jam_price = max(order_depths[Product.JAMS].buy_orders.keys())
+                djembe_price = max(order_depths[Product.DJEMBES].buy_orders.keys())
+
+            component_orders[Product.CROISSANTS].append(Order(
+                Product.CROISSANTS, croissant_price, quantity * BASKET_WEIGHTS[Product.CROISSANTS]))
+            component_orders[Product.JAMS].append(Order(
+                Product.JAMS, jam_price, quantity * BASKET_WEIGHTS[Product.JAMS]))
+            component_orders[Product.DJEMBES].append(Order(
+                Product.DJEMBES, djembe_price, quantity * BASKET_WEIGHTS[Product.DJEMBES]))
+
+        return component_orders
+
+    def execute_spread_orders(self, basket_position: int, order_depths: Dict[str, OrderDepth]) -> Dict[str, List[Order]] | None:
+        basket_od = order_depths[Product.PICNIC_BASKET1]
+        synthetic_od = self.get_synthetic_basket_order_depth(order_depths)
+
+        try:
+            basket_ask = min(basket_od.sell_orders)
+            basket_bid = max(basket_od.buy_orders)
+            synthetic_ask = min(synthetic_od.sell_orders)
+            synthetic_bid = max(synthetic_od.buy_orders)
+        except ValueError:
+            return None  # Some order book is empty
+
+        # --- Spread logic ---
+        spread_buy = synthetic_bid - basket_ask  # We buy basket, sell synthetic
+        spread_sell = basket_bid - synthetic_ask  # We sell basket, buy synthetic
+        threshold = 25  # Only trade if spread > this
+
+        # --- Maximum allowed trade size per opportunity ---
+        max_size = 5  # hard cap for safety
+
+        # --- If synthetic overpriced, sell synthetic, buy basket ---
+        if spread_buy > threshold:
+            confidence = min((spread_buy - threshold) / threshold, 1.0)
+            volume = int(confidence * max_size)
+
+            # Cap volume by order book depth
+            volume = min(volume, abs(basket_od.sell_orders[basket_ask]), abs(synthetic_od.buy_orders[synthetic_bid]))
+
+            if volume <= 0:
+                return None
+
+            synthetic_orders = [Order(Product.SYNTHETIC, synthetic_bid, -volume)]
+            basket_orders = [Order(Product.PICNIC_BASKET1, basket_ask, volume)]
+            result = self.convert_synthetic_basket_orders(synthetic_orders, order_depths)
+            result[Product.PICNIC_BASKET1] = basket_orders
+            return result
+
+        # --- If basket overpriced, sell basket, buy synthetic ---
+        elif spread_sell > threshold:
+            confidence = min((spread_sell - threshold) / threshold, 1.0)
+            volume = int(confidence * max_size)
+
+            volume = min(volume, abs(basket_od.buy_orders[basket_bid]), abs(synthetic_od.sell_orders[synthetic_ask]))
+
+            if volume <= 0:
+                return None
+
+            synthetic_orders = [Order(Product.SYNTHETIC, synthetic_ask, volume)]
+            basket_orders = [Order(Product.PICNIC_BASKET1, basket_bid, -volume)]
+            result = self.convert_synthetic_basket_orders(synthetic_orders, order_depths)
+            result[Product.PICNIC_BASKET1] = basket_orders
+            return result
+
+        return None
+
+    def run(self, state: TradingState) -> dict[str, list[Order]]:
+        basket_position = state.position.get(self.symbol, 0)
+        result = self.execute_spread_orders(basket_position, state.order_depths)
+        return result if result else {}
+   
+    def save(self) -> JSON:
+        return {}
+
+    def load(self, data: JSON) -> None:
+        pass
+
+class Product2:
+    CROISSANTS = "CROISSANTS"
+    JAMS = "JAMS"
+    DJEMBES = "DJEMBES"
+    PICNIC_BASKET2 = "PICNIC_BASKET2"
+    SYNTHETIC = "SYNTHETIC"
+
+BASKET_WEIGHTS2 = {
+    Product2.CROISSANTS: 4,
+    Product2.JAMS: 2,
+    Product2.DJEMBES: 0,
+}
+
+class BasketTrader2:
+    def __init__(self, symbol: str, limit: int):
+        self.symbol = symbol
+        self.limit = limit
+    def get_synthetic_basket_order_depth(self, order_depths: Dict[str, OrderDepth]) -> OrderDepth:
+        synthetic_depth = OrderDepth()
+
+        croissants_bid = max(order_depths[Product2.CROISSANTS].buy_orders.keys(), default=0)
+        croissants_ask = min(order_depths[Product2.CROISSANTS].sell_orders.keys(), default=float("inf"))
+
+        jams_bid = max(order_depths[Product2.JAMS].buy_orders.keys(), default=0)
+        jams_ask = min(order_depths[Product2.JAMS].sell_orders.keys(), default=float("inf"))
+
+        djembes_bid = max(order_depths[Product2.DJEMBES].buy_orders.keys(), default=0)
+        djembes_ask = min(order_depths[Product2.DJEMBES].sell_orders.keys(), default=float("inf"))
+
+        implied_bid = croissants_bid * BASKET_WEIGHTS2[Product2.CROISSANTS] + \
+                       jams_bid * BASKET_WEIGHTS2[Product2.JAMS] + \
+                       djembes_bid * BASKET_WEIGHTS2[Product2.DJEMBES]
+
+        implied_ask = croissants_ask * BASKET_WEIGHTS2[Product2.CROISSANTS] + \
+                       jams_ask * BASKET_WEIGHTS2[Product2.JAMS] + \
+                       djembes_ask * BASKET_WEIGHTS2[Product2.DJEMBES]
+
+        if implied_bid > 0:
+            vol_bid = min(
+                order_depths[Product2.CROISSANTS].buy_orders.get(croissants_bid, 0) // BASKET_WEIGHTS2[Product2.CROISSANTS],
+                order_depths[Product2.JAMS].buy_orders.get(jams_bid, 0) // BASKET_WEIGHTS2[Product2.JAMS],
+
+            )
+            synthetic_depth.buy_orders[implied_bid] = vol_bid
+
+        if implied_ask < float("inf"):
+            vol_ask = min(
+                -order_depths[Product2.CROISSANTS].sell_orders.get(croissants_ask, 0) // BASKET_WEIGHTS2[Product2.CROISSANTS],
+                -order_depths[Product2.JAMS].sell_orders.get(jams_ask, 0) // BASKET_WEIGHTS2[Product2.JAMS],
+                
+            )
+            synthetic_depth.sell_orders[implied_ask] = -vol_ask
+        logger.print("synth")
+        logger.print(synthetic_depth.sell_orders)
+        return synthetic_depth
+
+    def convert_synthetic_basket_orders(self, synthetic_orders: List[Order], order_depths: Dict[str, OrderDepth]) -> Dict[str, List[Order]]:
+        component_orders = {
+            Product2.CROISSANTS: [],
+            Product2.JAMS: [],
+            Product2.DJEMBES: [],
+        }
+
+        for order in synthetic_orders:
+            price = order.price
+            quantity = order.quantity
+
+            if quantity > 0:
+                croissant_price = min(order_depths[Product2.CROISSANTS].sell_orders.keys())
+                jam_price = min(order_depths[Product2.JAMS].sell_orders.keys())
+                djembe_price = min(order_depths[Product2.DJEMBES].sell_orders.keys())
+            else:
+                croissant_price = max(order_depths[Product2.CROISSANTS].buy_orders.keys())
+                jam_price = max(order_depths[Product2.JAMS].buy_orders.keys())
+                djembe_price = max(order_depths[Product2.DJEMBES].buy_orders.keys())
+
+            component_orders[Product2.CROISSANTS].append(Order(
+                Product2.CROISSANTS, croissant_price, quantity * BASKET_WEIGHTS[Product2.CROISSANTS]))
+            component_orders[Product2.JAMS].append(Order(
+                Product2.JAMS, jam_price, quantity * BASKET_WEIGHTS[Product2.JAMS]))
+            component_orders[Product2.DJEMBES].append(Order(
+                Product2.DJEMBES, djembe_price, quantity * BASKET_WEIGHTS[Product2.DJEMBES]))
+
+        return component_orders
+
+    def execute_spread_orders(self, basket_position: int, order_depths: Dict[str, OrderDepth]) -> Dict[str, List[Order]] | None:
+        basket_od = order_depths[Product2.PICNIC_BASKET2]
+        synthetic_od = self.get_synthetic_basket_order_depth(order_depths)
+
+        try:
+            basket_ask = min(basket_od.sell_orders)
+            basket_bid = max(basket_od.buy_orders)
+            synthetic_ask = min(synthetic_od.sell_orders)
+            synthetic_bid = max(synthetic_od.buy_orders)
+        except ValueError:
+            return None  # Some order book is empty
+
+        # --- Spread logic ---
+        spread_buy = synthetic_bid - basket_ask  # We buy basket, sell synthetic
+        spread_sell = basket_bid - synthetic_ask  # We sell basket, buy synthetic
+        threshold = 25  # Only trade if spread > this
+
+        # --- Maximum allowed trade size per opportunity ---
+        max_size = 10  # hard cap for safety
+
+        # --- If synthetic overpriced, sell synthetic, buy basket ---
+        if spread_buy > threshold:
+            confidence = min((spread_buy - threshold) / threshold, 1.0)
+            volume = int(confidence * max_size)
+
+            # Cap volume by order book depth
+            volume = min(volume, abs(basket_od.sell_orders[basket_ask]), abs(synthetic_od.buy_orders[synthetic_bid]))
+
+            if volume <= 0:
+                return None
+
+            synthetic_orders = [Order(Product2.SYNTHETIC, synthetic_bid, -volume)]
+            basket_orders = [Order(Product2.PICNIC_BASKET2, basket_ask, volume)]
+            result = self.convert_synthetic_basket_orders(synthetic_orders, order_depths)
+            result[Product2.PICNIC_BASKET2] = basket_orders
+            return result
+
+        # --- If basket overpriced, sell basket, buy synthetic ---
+        elif spread_sell > threshold:
+            confidence = min((spread_sell - threshold) / threshold, 1.0)
+            volume = int(confidence * max_size)
+
+            volume = min(volume, abs(basket_od.buy_orders[basket_bid]), abs(synthetic_od.sell_orders[synthetic_ask]))
+
+            if volume <= 0:
+                return None
+
+            synthetic_orders = [Order(Product2.SYNTHETIC, synthetic_ask, volume)]
+            basket_orders = [Order(Product2.PICNIC_BASKET2, basket_bid, -volume)]
+            result = self.convert_synthetic_basket_orders(synthetic_orders, order_depths)
+            result[Product2.PICNIC_BASKET2] = basket_orders
+            return result
+
+        return None
 # Modified Trader that integrates the pairs strategy.
+    def run(self, state: TradingState) -> dict[str, list[Order]]:
+        basket_position = state.position.get(self.symbol, 0)
+        result = self.execute_spread_orders(basket_position, state.order_depths)
+        return result if result else {}
+   
+    def save(self) -> JSON:
+        return {}
+
+    def load(self, data: JSON) -> None:
+        pass
 class Trader:
     def __init__(self) -> None:
         limits = {
@@ -848,7 +1199,8 @@ class Trader:
             "VOLCANIC_ROCK_VOUCHER_9750": 0,
             "VOLCANIC_ROCK_VOUCHER_10000": 200,
             "VOLCANIC_ROCK_VOUCHER_10250": 0,
-            "VOLCANIC_ROCK_VOUCHER_10500": 0
+            "VOLCANIC_ROCK_VOUCHER_10500": 0,
+            "MAGNIFICENT_MACARONS": 75
         }
         
 
@@ -860,13 +1212,15 @@ class Trader:
             "RAINFOREST_RESIN": RainforestResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"]),
             "SQUID_INK": SquidInkStrategy("SQUID_INK", limits["SQUID_INK"]),
             "DJEMBES": DjembeRatioArbitrageStrategy("DJEMBES", limits["DJEMBES"]),
-            "PICNIC_BASKET1": CombinedBasketStrategy(
+            # "PICNIC_BASKET1": BasketTrader(Product.PICNIC_BASKET1, limits["PICNIC_BASKET1"]),
+            # "PICNIC_BASKET2": BasketTrader2(Product2.PICNIC_BASKET2, limits["PICNIC_BASKET2"]),
+             "COMBINE_ONE": CombinedBasketStrategy(
                 "PICNIC_BASKET1", limits["PICNIC_BASKET1"],
                 {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
                 buy_z=0.7, sell_z=0.7, exit_z=0.2,
                 mean=48.76, std=85.91
             ),
-            "PICNIC_BASKET2": CombinedBasketStrategy(
+            "COMBINE_TWO": CombinedBasketStrategy(
                 "PICNIC_BASKET2", limits["PICNIC_BASKET2"],
                 {"CROISSANTS": 4, "JAMS": 2},
                 buy_z=2.2, sell_z=0.9, exit_z=0.1,
@@ -890,6 +1244,8 @@ class Trader:
                                                                sell_z=1,
                                                                exit_z=0.2,
                                                                hist_std=0.006110812702837127),
+        "MAGNIFICENT_MACARONS": MacaronStrategy("MAGNIFICENT_MACARONS", limits["MAGNIFICENT_MACARONS"], 10)
+
         }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
@@ -905,11 +1261,16 @@ class Trader:
             if key in old_trader_data:
                 strategy.load(old_trader_data[key])
             result = strategy.run(state)
-            
+           
             if isinstance(result, list):  # single-symbol strategy
                 orders[strategy.symbol] = result
             elif isinstance(result, dict):  # multi-symbol strategy
                 orders.update(result)
+            elif isinstance(result, tuple):
+            # Expected return format: (orders, conversion_int)
+                strategy_orders, strategy_conversions = result
+                orders[strategy.symbol] = strategy_orders
+                conversions += strategy_conversions
 
             new_trader_data[key] = strategy.save()
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))

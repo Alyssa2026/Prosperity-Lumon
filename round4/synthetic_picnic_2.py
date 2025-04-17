@@ -139,13 +139,13 @@ class Product:
     CROISSANTS = "CROISSANTS"
     JAMS = "JAMS"
     DJEMBES = "DJEMBES"
-    PICNIC_BASKET1 = "PICNIC_BASKET1"
+    PICNIC_BASKET2 = "PICNIC_BASKET2"
     SYNTHETIC = "SYNTHETIC"
 
 BASKET_WEIGHTS = {
-    Product.CROISSANTS: 6,
-    Product.JAMS: 3,
-    Product.DJEMBES: 1,
+    Product.CROISSANTS: 4,
+    Product.JAMS: 2,
+    Product.DJEMBES: 0,
 }
 
 class BasketTrader:
@@ -173,7 +173,7 @@ class BasketTrader:
             vol_bid = min(
                 order_depths[Product.CROISSANTS].buy_orders.get(croissants_bid, 0) // BASKET_WEIGHTS[Product.CROISSANTS],
                 order_depths[Product.JAMS].buy_orders.get(jams_bid, 0) // BASKET_WEIGHTS[Product.JAMS],
-                order_depths[Product.DJEMBES].buy_orders.get(djembes_bid, 0) // BASKET_WEIGHTS[Product.DJEMBES],
+
             )
             synthetic_depth.buy_orders[implied_bid] = vol_bid
 
@@ -181,7 +181,7 @@ class BasketTrader:
             vol_ask = min(
                 -order_depths[Product.CROISSANTS].sell_orders.get(croissants_ask, 0) // BASKET_WEIGHTS[Product.CROISSANTS],
                 -order_depths[Product.JAMS].sell_orders.get(jams_ask, 0) // BASKET_WEIGHTS[Product.JAMS],
-                -order_depths[Product.DJEMBES].sell_orders.get(djembes_ask, 0) // BASKET_WEIGHTS[Product.DJEMBES],
+                
             )
             synthetic_depth.sell_orders[implied_ask] = -vol_ask
         logger.print("synth")
@@ -218,7 +218,7 @@ class BasketTrader:
         return component_orders
 
     def execute_spread_orders(self, basket_position: int, order_depths: Dict[str, OrderDepth]) -> Dict[str, List[Order]] | None:
-        basket_od = order_depths[Product.PICNIC_BASKET1]
+        basket_od = order_depths[Product.PICNIC_BASKET2]
         synthetic_od = self.get_synthetic_basket_order_depth(order_depths)
 
         try:
@@ -235,7 +235,7 @@ class BasketTrader:
         threshold = 25  # Only trade if spread > this
 
         # --- Maximum allowed trade size per opportunity ---
-        max_size = 5  # hard cap for safety
+        max_size = 10  # hard cap for safety
 
         # --- If synthetic overpriced, sell synthetic, buy basket ---
         if spread_buy > threshold:
@@ -249,9 +249,9 @@ class BasketTrader:
                 return None
 
             synthetic_orders = [Order(Product.SYNTHETIC, synthetic_bid, -volume)]
-            basket_orders = [Order(Product.PICNIC_BASKET1, basket_ask, volume)]
+            basket_orders = [Order(Product.PICNIC_BASKET2, basket_ask, volume)]
             result = self.convert_synthetic_basket_orders(synthetic_orders, order_depths)
-            result[Product.PICNIC_BASKET1] = basket_orders
+            result[Product.PICNIC_BASKET2] = basket_orders
             return result
 
         # --- If basket overpriced, sell basket, buy synthetic ---
@@ -265,9 +265,9 @@ class BasketTrader:
                 return None
 
             synthetic_orders = [Order(Product.SYNTHETIC, synthetic_ask, volume)]
-            basket_orders = [Order(Product.PICNIC_BASKET1, basket_bid, -volume)]
+            basket_orders = [Order(Product.PICNIC_BASKET2, basket_bid, -volume)]
             result = self.convert_synthetic_basket_orders(synthetic_orders, order_depths)
-            result[Product.PICNIC_BASKET1] = basket_orders
+            result[Product.PICNIC_BASKET2] = basket_orders
             return result
 
         return None
@@ -280,7 +280,7 @@ class Trader:
             "CROISSANTS": 250,
             "JAMS": 350,
             "DJEMBES": 60,
-            "PICNIC_BASKET1": 60,
+          
             "PICNIC_BASKET2": 100,
         }
     
@@ -297,7 +297,7 @@ class Trader:
         conversions = 0
         orders: Dict[str, List[Order]] = {}
 
-        basket_position = state.position.get(Product.PICNIC_BASKET1, 0)
+        basket_position = state.position.get(Product.PICNIC_BASKET2, 0)
         
        
         result = self.spread_strategy.execute_spread_orders(basket_position, state.order_depths)
