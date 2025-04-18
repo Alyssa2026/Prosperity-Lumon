@@ -152,38 +152,152 @@ class Strategy:
     def load(self, data: JSON) -> None:
         pass
 
+from collections import deque
+from typing import Tuple, List
+
 class MacaronStrategy(Strategy):
-    
+    # === step‑50 intercept & coefs from your offline fit ===
+    INTERCEPT_50 =  0.33327811328582885           # ← replace with your lr50.intercept_
+    COEFS_50 = {
+        'sugarPrice_dmean':    -10.8603,
+        'exportTariff_dmean':   73.0951,
+        'transportFees_dmean': 1966.8889,
+        'importTariff_dmean':  -849.9047,
+        'sunlightIndex_dmean': -197.4299
+    }
+
+    # how much of that predicted Δ to embed in our passives
+    BIAS_FACTOR = 3
+
     STORAGE_COST_PER_LONG = 0.1
-    
+
     def __init__(self, symbol: str, limit: int, conversion_limit: int) -> None:
         super().__init__(symbol, limit)
         self.conversion_limit = conversion_limit
-    
-    def run(self, state: TradingState) -> tuple[list[Order], int]:
-        self.orders = []
+
+        # raw features and their rolling windows (50 ticks)
+        self.orig_feats = [
+            'sugarPrice',
+            'exportTariff',
+            'transportFees',
+            'importTariff',
+            'sunlightIndex'
+        ]
+        self.feat_windows = {
+            f: deque(maxlen=50) for f in self.orig_feats
+        }
+        self.last_feat_mean = {f: None for f in self.orig_feats}
+
+        # a window to hold the last 50 mid_prices
+        self.mid_window = deque(maxlen=50)
+
+    def run(self, state: TradingState) -> Tuple[List[Order], int]:
+        conv = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
+        self.unpackObservations(conv)
+
+        # update feature deques
+        for f in self.orig_feats:
+            self.feat_windows[f].append(getattr(self, f))
+
+        # update mid window
+        mid = self.get_mid_price(state)
+        if mid is not None:
+            self.mid_window.append(mid)
+
+        self.orders      = []
         self.conversions = 0
-        self.unpackObservations(state.observations.conversionObservations["MAGNIFICENT_MACARONS"])
         self.act(state)
         return self.orders, self.conversions
-    
-    def unpackObservations(self, conversionObservations: ConversionObservation):
-        self.bidPrice = conversionObservations.bidPrice
-        self.askPrice = conversionObservations.askPrice
-        self.transportFees = conversionObservations.transportFees
-        self.exportTariff = conversionObservations.exportTariff
-        self.importTariff = conversionObservations.importTariff
-        self.sugarPrice = conversionObservations.sugarPrice
-        self.sunlightIndex = conversionObservations.sunlightIndex
-        
-    def get_predicted_future_value(self, state):
-        pass
-    
-    def get_mid_price(self, state):
-        pass
-    
-    def act(self, state: TradingState):
-        pass
+
+    def unpackObservations(self, conv: ConversionObservation):
+        self.bidPrice      = conv.bidPrice
+        self.askPrice      = conv.askPrice
+        self.transportFees = conv.transportFees
+        self.exportTariff  = conv.exportTariff
+        self.importTariff  = conv.importTariff
+        self.sugarPrice    = conv.sugarPrice
+        self.sunlightIndex = conv.sunlightIndex
+
+    def get_mid_price(self, state: TradingState) -> float | None:
+        od = state.order_depths.get(self.symbol)
+        if not od or not od.buy_orders or not od.sell_orders:
+            return None
+        return 0.5 * (max(od.buy_orders) + min(od.sell_orders))
+
+    def compute_dmean_features(self) -> dict:
+        """
+        Returns a dict of 10‑tick rolling‐mean deltas for each raw feature.
+        """
+        deltas = {}
+        for f in self.orig_feats:
+            win = self.feat_windows[f]
+            if len(win) < 2:
+                # not enough data yet
+                deltas[f] = 0.0
+            else:
+                curr_mean = sum(win) / len(win)
+                prev_mean = self.last_feat_mean[f]
+                deltas[f] = (curr_mean - prev_mean) if prev_mean is not None else 0.0
+                self.last_feat_mean[f] = curr_mean
+        return deltas
+
+    def predict_50_tick_delta(self, dmeans: dict) -> float:
+        """
+        Applies the hard‑coded 50‑tick regression:
+          Δ̂50 = intercept + Σ coef_i * dmean_i
+        """
+        val = self.INTERCEPT_50
+        for name, coef in self.COEFS_50.items():
+            feat = name.replace('_dmean','')
+            val += coef * dmeans[feat]
+        return val
+
+    def act(self, state: TradingState) -> None:
+        # only proceed if we have a full 50‑tick history
+        if len(self.mid_window) < 50:
+            return
+
+        # 1) get current mid
+        mid = self.mid_window[-1]
+
+        # 2) compute dmean features
+        dmeans = self.compute_dmean_features()
+
+        # 3) predict the 50‑tick change
+        pred_delta = self.predict_50_tick_delta(dmeans)
+
+        # 4) lean center of market‑making
+        center = mid + self.BIAS_FACTOR * pred_delta
+
+        # 5) post passive quotes around `center`
+        od    = state.order_depths[self.symbol]
+        buys  = sorted(od.buy_orders .items(), reverse=True)
+        sells = sorted(od.sell_orders.items())
+
+        pos     = state.position.get(self.symbol, 0)
+        to_buy  = self.limit - pos
+        to_sell = self.limit + pos
+
+        # decide your skewed best bid/ask
+        max_bid = center if pos <= 0 else center - 1
+        min_ask = center if pos >= 0 else center + 1
+
+        # passive bids
+        for price, vol in sells:
+            if to_buy <= 0: break
+            if price <= max_bid:
+                qty = min(to_buy, -vol)
+                self.buy(price, qty)
+                to_buy -= qty
+
+        # passive asks
+        for price, vol in buys:
+            if to_sell <= 0: break
+            if price >= min_ask:
+                qty = min(to_sell, vol)
+                self.sell(price, qty)
+                to_sell -= qty
+
         
         
         
