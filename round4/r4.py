@@ -835,20 +835,20 @@ class VolcanicVoucherStrategy(Strategy):
 class Trader:
     def __init__(self) -> None:
         limits = {
-            "KELP": 50,
-            "RAINFOREST_RESIN": 50,
-            "SQUID_INK": 50,
-            "CROISSANTS": 250,
-            "JAMS": 350,
-            "DJEMBES": 60,
-            "PICNIC_BASKET1": 60,
-            "PICNIC_BASKET2": 100,
+            "KELP": 0,
+            "RAINFOREST_RESIN": 0,
+            "SQUID_INK": 0,
+            "CROISSANTS": 0,
+            "JAMS": 0,
+            "DJEMBES": 0,
+            "PICNIC_BASKET1": 0,
+            "PICNIC_BASKET2": 0,
             "VOLCANIC_ROCK": 0,
-            "VOLCANIC_ROCK_VOUCHER_9500": 0,
-            "VOLCANIC_ROCK_VOUCHER_9750": 0,
+            "VOLCANIC_ROCK_VOUCHER_9500": 200,
+            "VOLCANIC_ROCK_VOUCHER_9750": 200,
             "VOLCANIC_ROCK_VOUCHER_10000": 200,
-            "VOLCANIC_ROCK_VOUCHER_10250": 0,
-            "VOLCANIC_ROCK_VOUCHER_10500": 0
+            "VOLCANIC_ROCK_VOUCHER_10250": 200,
+            "VOLCANIC_ROCK_VOUCHER_10500": 200
         }
         
 
@@ -890,6 +890,21 @@ class Trader:
                                                                sell_z=1,
                                                                exit_z=0.2,
                                                                hist_std=0.006110812702837127),
+                                                                "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy(
+        "VOLCANIC_ROCK_VOUCHER_9500", 200, 9500,
+        buy_z=0.75, sell_z=float("inf"), exit_z=0.15, hist_std=0.004),
+    
+        "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy(
+            "VOLCANIC_ROCK_VOUCHER_9750", 200, 9750,
+            buy_z=0.5, sell_z=float("inf"), exit_z=0.15, hist_std=0.005),
+        
+        "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy(
+            "VOLCANIC_ROCK_VOUCHER_10250", 200, 10250,
+            buy_z=0.75, sell_z=1.75, exit_z=0.25, hist_std=0.007),
+
+        "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy(
+            "VOLCANIC_ROCK_VOUCHER_10500", 200, 10500,
+            buy_z=1.0, sell_z=1.0, exit_z=0.2, hist_std=0.0065),
         }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
