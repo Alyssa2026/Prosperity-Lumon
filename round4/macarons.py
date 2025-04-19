@@ -155,28 +155,48 @@ class Strategy:
 from datamodel import Order, TradingState, ConversionObservation, Symbol
 
 
+import math
+from collections import deque
+from datamodel import ConversionObservation, Order, TradingState, Symbol
+
 class MacaronStrategy(Strategy):
+    STORAGE_COST_PER_LONG = 0.1
+
+    # scaler & logistic params from notebook
+    SC_MEANS  = {'sunlightIndex': 55.1674,
+                 'sun_slope':     -0.000167,
+                 'low60':          0.606233,
+                 'persist':       241.0499}
+    SC_SCALES = {'sunlightIndex': 10.3269,
+                 'sun_slope':      0.01118,
+                 'low60':          0.488584,
+                 'persist':       556.6172}
+    COEFS     = {'sunlightIndex': -8.52,
+                 'sun_slope':     -1.27,
+                 'low60':         -0.04,
+                 'persist':        0.05}
+    INTERCEPT = -0.33
+
     def __init__(self,
-                 symbol: str,
+                 symbol: Symbol,
                  limit: int,
                  conversion_limit: int,
-                 enter_csi: float,
-                 exit_csi: float,
-                 persistence: int) -> None:
+                 post_regime_duration: int = 17):
         super().__init__(symbol, limit)
         self.conversion_limit = conversion_limit
-        self.enter_csi       = enter_csi
-        self.exit_csi        = exit_csi
-        self.persistence     = persistence
+        # tracking
+        self.prev_low       = False
+        self.persist_count  = 0
+        self.prev_sun_index = None
+        self.prev_in_regime = False
+        self.cooldown       = 0
+        self.post_duration  = post_regime_duration
 
-        # track the “fresh” persistence since crossing below enter_csi
-        self.prev_low = False
-        self.persist  = 0
-
-    def run(self, state: TradingState) -> tuple[list[Order], int]:
+    def run(self, state: TradingState):
         self.orders      = []
         self.conversions = 0
 
+        # unpack conversion obs
         conv: ConversionObservation = state.observations.conversionObservations[self.symbol]
         self.ask       = conv.askPrice
         self.bid       = conv.bidPrice
@@ -185,53 +205,103 @@ class MacaronStrategy(Strategy):
         self.e_tariff  = conv.exportTariff
         self.sun_index = conv.sunlightIndex
 
+        # compute sun slope
+        if self.prev_sun_index is None:
+            sun_slope = 0.0
+        else:
+            sun_slope = self.sun_index - self.prev_sun_index
+        self.prev_sun_index = self.sun_index
+
+        # update persistence for logistic features
+        ENTER_CSI, EXIT_CSI = 45, 47
+        low_flag = (self.sun_index <= ENTER_CSI)
+        if low_flag and not self.prev_low:
+            self.persist_count = 1
+        elif low_flag and self.prev_low:
+            self.persist_count += 1
+        else:
+            if self.sun_index > EXIT_CSI:
+                self.persist_count = 0
+        self.prev_low = low_flag
+
+        # scale features
+        f_si  = (self.sun_index   - self.SC_MEANS['sunlightIndex']) / self.SC_SCALES['sunlightIndex']
+        f_ss  = (sun_slope        - self.SC_MEANS['sun_slope'])     / self.SC_SCALES['sun_slope']
+        low60 = 1 if self.sun_index < 60 else 0
+        f_l60 = (low60           - self.SC_MEANS['low60'])        / self.SC_SCALES['low60']
+        f_pr  = (self.persist_count - self.SC_MEANS['persist'])  / self.SC_SCALES['persist']
+
+        # logistic regime probability
+        logit = (self.INTERCEPT
+                 + self.COEFS['sunlightIndex'] * f_si
+                 + self.COEFS['sun_slope']     * f_ss
+                 + self.COEFS['low60']         * f_l60
+                 + self.COEFS['persist']       * f_pr)
+        prob      = 1 / (1 + math.exp(-logit))
+        in_regime = prob > 0.5
+
+        # detect regime end and trigger cooldown
+        if self.prev_in_regime and not in_regime:
+            self.cooldown = self.post_duration
+        self.prev_in_regime = in_regime
+
         depth = state.order_depths[self.symbol]
         if not depth.buy_orders or not depth.sell_orders:
             return self.orders, self.conversions
+
         best_bid = max(depth.buy_orders)
         best_ask = min(depth.sell_orders)
+        pos      = state.position.get(self.symbol, 0)
 
+        # === regime actions ===
+        if in_regime:
+            # buy all asks to go full long
+            to_buy = self.limit - pos
+            for p, v in sorted(depth.sell_orders.items()):
+                if to_buy <= 0:
+                    break
+                qty = min(-v, to_buy)
+                self.buy(p, qty)
+                to_buy -= qty
+            return self.orders, self.conversions
+
+        # if in cooldown, short all the way
+        if self.cooldown > 0:
+            to_sell = self.limit + pos
+            for p, v in sorted(depth.buy_orders.items(), reverse=True):
+                if to_sell <= 0:
+                    break
+                qty = min(v, to_sell)
+                self.sell(p, qty)
+                to_sell -= qty
+            self.cooldown -= 1
+            return self.orders, self.conversions
+
+        # === normal market making & chef conversion ===
+        # flatten via chef if profitable
         conv_cost = self.ask + self.t_fees + self.i_tariff
-        conv_rev  = self.bid - (self.t_fees + self.e_tariff)
-        pos = state.position.get(self.symbol, 0)
+        conv_rev  = self.bid - self.t_fees - self.e_tariff
+        mid       = 0.5 * (best_bid + best_ask)
 
-        # convert to other island if worth based on mid
-        if pos > 0 and conv_rev > best_ask:
-            logger.print("Worth sell")
+        # flatten long
+        if pos > 0 and conv_rev > mid:
             qty = min(pos, self.conversion_limit)
             self.conversions -= qty
             pos -= qty
-        if pos < 0 and conv_cost < best_bid:
-            logger.print("Worth buy")
-            qty = max(-pos, -self.conversion_limit)
+        # flatten short
+        if pos < 0 and conv_cost < mid:
+            qty = min(-pos, self.conversion_limit)
             self.conversions += qty
             pos += qty
-        
-        to_buy = self.conversion_limit - pos
-        to_sell = self.conversion_limit + pos
-        # sweep ask/bid if worth to convert
-        for ask_p, ask_v in sorted(depth.sell_orders.items()):
-            if to_buy <= 0 or ask_p >= conv_rev: 
-                break
-            logger.print("sweep asks")
-            qty = min(-ask_v, to_buy)
-            self.buy(ask_p, qty)
-            to_buy -= qty
 
-        for bid_p, bid_v in sorted(depth.buy_orders.items(), reverse=True):
-            if to_sell <= 0 or bid_p <= conv_cost:
-                break
-            logger.print("sweep bids")
-            qty = min(bid_v, to_sell)
-            self.sell(bid_p, qty)
-            to_sell -= qty
-            
-        if to_buy > 0:
-            self.buy(best_bid + 1, to_buy)
+        # inside‐spread market making
+        bid_cap = self.limit - pos - self.conversions
+        ask_cap = self.limit + pos + self.conversions
+        if bid_cap > 0:
+            self.buy(best_bid + 1, bid_cap)
+        if ask_cap > 0:
+            self.sell(best_ask - 1, ask_cap)
 
-        if to_sell > 0:
-            self.sell(best_ask - 1, to_sell)
-        
         return self.orders, self.conversions
 
 
@@ -252,9 +322,6 @@ class Trader:
                 symbol="MAGNIFICENT_MACARONS",
                 limit=limits["MAGNIFICENT_MACARONS"],
                 conversion_limit=limits["MAGNIFICENT_MACARONS_CONVERSIONS"],
-                enter_csi=45.0,
-                exit_csi=47.0,
-                persistence=17
             )
         }
 
