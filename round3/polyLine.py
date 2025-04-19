@@ -6,20 +6,7 @@ from statistics import NormalDist
 from scipy.optimize import brentq
 from scipy.stats import zscore
 
-# Load the CSV
-csv_path = "/Users/lianli/Desktop/Prosperity-Lumon/round3/data/prices_round_3_day_0.csv"
-df = pd.read_csv(csv_path, sep=";")
-
-# Define the strikes
-voucher_strikes = {
-    "VOLCANIC_ROCK_VOUCHER_9500": 9500,
-    "VOLCANIC_ROCK_VOUCHER_9750": 9750,
-    "VOLCANIC_ROCK_VOUCHER_10000": 10000,
-    "VOLCANIC_ROCK_VOUCHER_10250": 10250,
-    "VOLCANIC_ROCK_VOUCHER_10500": 10500,
-}
-
-# Black-Scholes call option pricing
+# Black‑Scholes call option pricing
 def bs_call_price(S, K, T, sigma, r=0.0):
     if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
         return float("nan")
@@ -35,69 +22,85 @@ def implied_volatility(S, K, T, market_price):
         return float("nan")
 
 # Parameters
-EXPIRY_DAY = 8
+EXPIRY_DAY    = 8
 CURRENT_ROUND = 0
 
-# Collect m and IV pairs
-m_iv_pairs = []
+# Define your strikes
+voucher_strikes = {
+    "VOLCANIC_ROCK_VOUCHER_9500": 9500,
+    "VOLCANIC_ROCK_VOUCHER_9750": 9750,
+    "VOLCANIC_ROCK_VOUCHER_10000": 10000,
+    "VOLCANIC_ROCK_VOUCHER_10250": 10250,
+    "VOLCANIC_ROCK_VOUCHER_10500": 10500,
+}
 
-for timestamp in df["timestamp"].unique():
-    tick_df = df[df["timestamp"] == timestamp]
-    rock_row = tick_df[tick_df["product"] == "VOLCANIC_ROCK"]
-    if rock_row.empty:
+# Load & shift all three days
+df_list = []
+for day in (0, 1, 2):
+    path = f"./round3/data/prices_round_3_day_{day}.csv"
+    day_df = pd.read_csv(path, sep=";")
+    day_df["timestamp"] += day * 100_000
+    df_list.append(day_df)
+df = pd.concat(df_list, ignore_index=True)
+
+# Collect (m, iv) pairs
+m_iv = []
+for ts in df["timestamp"].unique():
+    tick = df[df["timestamp"] == ts]
+
+    # Recompute spot from VOLCANIC_ROCK bids/asks:
+    rock = tick[tick["product"] == "VOLCANIC_ROCK"]
+    if rock.empty:
         continue
-    spot = rock_row["mid_price"].values[0]
-    fractional_day = CURRENT_ROUND + (timestamp / 1_000_000)
-    days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
-    TTE = days_to_expiry / 365
+    rock_row = rock.iloc[0]
+    spot_bid = rock_row["bid_price_1"]
+    spot_ask = rock_row["ask_price_1"]
+    spot = (spot_bid + spot_ask) / 2
+
+    # Compute time‑to‑expiry as before…
+    fractional = CURRENT_ROUND + (ts / 1_000_000)  # adjust units if needed
+    TTE = max(0.0, EXPIRY_DAY - fractional) / 365
     if TTE <= 0:
         continue
 
-    for symbol, strike in voucher_strikes.items():
-        row = tick_df[tick_df["product"] == symbol]
+    # For each voucher, do the same:
+    for sym, K in voucher_strikes.items():
+        row = tick[tick["product"] == sym]
         if row.empty:
             continue
-        mid_price = row["mid_price"].values[0]
-        m = math.log(strike / spot) / math.sqrt(TTE)
-        iv = implied_volatility(spot, strike, TTE, mid_price)
+        vrow = row.iloc[0]
+        bid = vrow["bid_price_1"]
+        ask = vrow["ask_price_1"]
+        mid = (bid + ask) / 2
+
+        intrinsic = max(0.0, spot - K)
+        if mid <= intrinsic + 1e-8:
+            continue
+    
+        m = math.log(K / spot) / math.sqrt(TTE)
+        iv = implied_volatility(spot, K, TTE, mid)
         if not math.isnan(iv) and not math.isinf(iv):
-            m_iv_pairs.append((m, iv))
+            m_iv.append((m, iv))
 
-# Convert to array
-m_iv_array = np.array(m_iv_pairs)
+m_iv = np.array(m_iv)
+ivs = m_iv[:, 1]
 
-# --- Outlier Removal (Percentile) ---
-ivs_raw = m_iv_array[:, 1]
-lower, upper = np.percentile(ivs_raw, [30, 70])
-filtered_percentile = m_iv_array[(ivs_raw >= lower) & (ivs_raw <= upper)]
-
-# --- Outlier Removal (Z-score) ---
-ivs_zscores = zscore(filtered_percentile[:, 1])
-filtered_final = filtered_percentile[np.abs(ivs_zscores) < 2]
-
-# Unpack final cleaned data
-ms = filtered_final[:, 0]
-ivs = filtered_final[:, 1]
-
-# Fit parabola
+# Fit parabola to combined data
+ms = m_iv[:, 0]
+ivs = m_iv[:, 1]
 a, b, c = np.polyfit(ms, ivs, 2)
-
-# Print coefficients
-print(f"\nFitted parabola coefficients after filtering:")
-print(f"a = {a:.6f}")
-print(f"b = {b:.6f}")
-print(f"c = {c:.6f}")
+print(f"Combined fit coefficients: A={a:.6f}\nB={b:.6f}\nC={c:.6f}")
 
 # Plot
-m_vals = np.linspace(min(ms), max(ms), 200)
-ivs_fit = a * m_vals**2 + b * m_vals + c
+m_grid = np.linspace(ms.min(), ms.max(), 300)
+iv_fit = a*m_grid**2 + b*m_grid + c
 
-plt.figure(figsize=(10, 5))
-plt.scatter(ms, ivs, alpha=0.6, label="Filtered IV")
-plt.plot(m_vals, ivs_fit, color="orange", linestyle="--", label="Fitted IV Curve")
+plt.figure(figsize=(10,5))
+plt.scatter(ms, ivs, alpha=0.5, label="Cleaned IV points")
+plt.plot(m_grid, iv_fit, "--", label="Fitted parabola", linewidth=2)
 plt.xlabel("m = log(K/S) / sqrt(T)")
 plt.ylabel("Implied Volatility")
-plt.title("Implied Volatility vs m (Outliers Removed)")
+plt.title("Combined IV vs m (Days 0–2, outliers removed)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
