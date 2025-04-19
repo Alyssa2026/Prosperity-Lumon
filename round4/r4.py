@@ -829,14 +829,14 @@ class VolcanicVoucherStrategy(Strategy):
         elif z < self.exit_z:
             # Exit short: Buy all at current best ask.
             self.buy(round(mid_price), self.limit)
-class VolatilitySpreadStrategy(Strategy):
+class VolatilitySpreadStrategy:
     def __init__(self, symbols: list[str], strike_prices: list[int], limit: int) -> None:
-        super().__init__("VOLCANIC_SPREAD", limit)
         self.symbols = symbols
         self.strike_prices = strike_prices
         self.limit = limit
         self.entry_threshold = 0.02
         self.exit_threshold = 0.001
+        self.orders: Dict[str, List[Order]] = {}
 
     def act(self, state: TradingState) -> None:
         spot_depth = state.order_depths.get("VOLCANIC_ROCK")
@@ -872,40 +872,49 @@ class VolatilitySpreadStrategy(Strategy):
             trade_size = self.limit // 2
 
             logger.print(f"{symbol}: ΔIV = {delta_iv:.4f}, Position = {position}")
+            self.orders[symbol] = []
 
             if delta_iv > self.entry_threshold:
                 # OVERPRICED: SELL
                 filled = 0
                 for p, v in sorted(depth.buy_orders.items(), reverse=True):
                     q = min(trade_size - filled, v)
-                    self.orders.append(Order(symbol, p, -q))
+                    self.orders[symbol].append(Order(symbol, p, -q))
                     filled += q
                     if filled >= trade_size:
                         break
                 if filled < trade_size:
-                    self.orders.append(Order(symbol, round(mid), -(trade_size - filled)))
+                    self.orders[symbol].append(Order(symbol, round(mid), -(trade_size - filled)))
 
             elif delta_iv < -self.entry_threshold:
                 # UNDERPRICED: BUY
                 filled = 0
                 for p, v in sorted(depth.sell_orders.items()):
                     q = min(trade_size - filled, v)
-                    self.orders.append(Order(symbol, p, q))
+                    self.orders[symbol].append(Order(symbol, p, q))
                     filled += q
                     if filled >= trade_size:
                         break
                 if filled < trade_size:
-                    self.orders.append(Order(symbol, round(mid), trade_size - filled))
+                    self.orders[symbol].append(Order(symbol, round(mid), trade_size - filled))
 
             elif abs(delta_iv) < self.exit_threshold and position != 0:
                 # CLOSE THE POSITION NEAR FAIR VALUE
                 if position > 0:
-                    # Sell to exit long
-                    self.orders.append(Order(symbol, bid, -position))
+                    self.orders[symbol].append(Order(symbol, bid, -position))
                 elif position < 0:
-                    # Buy to exit short
-                    self.orders.append(Order(symbol, ask, -position))
+                    self.orders[symbol].append(Order(symbol, ask, -position))
 
+    def run(self, state: TradingState) -> Dict[str, List[Order]]:
+        self.orders = {}
+        self.act(state)
+        return self.orders
+
+    def save(self) -> JSON:
+        return {}
+
+    def load(self, data: JSON) -> None:
+        pass
 
 
        
