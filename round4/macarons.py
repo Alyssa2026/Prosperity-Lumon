@@ -152,38 +152,89 @@ class Strategy:
     def load(self, data: JSON) -> None:
         pass
 
+from datamodel import Order, TradingState, ConversionObservation, Symbol
+
+
 class MacaronStrategy(Strategy):
-    
-    STORAGE_COST_PER_LONG = 0.1
-    
-    def __init__(self, symbol: str, limit: int, conversion_limit: int) -> None:
+    def __init__(self,
+                 symbol: str,
+                 limit: int,
+                 conversion_limit: int,
+                 enter_csi: float,
+                 exit_csi: float,
+                 persistence: int) -> None:
         super().__init__(symbol, limit)
         self.conversion_limit = conversion_limit
-    
+        self.enter_csi       = enter_csi
+        self.exit_csi        = exit_csi
+        self.persistence     = persistence
+
+        # track the “fresh” persistence since crossing below enter_csi
+        self.prev_low = False
+        self.persist  = 0
+
     def run(self, state: TradingState) -> tuple[list[Order], int]:
-        self.orders = []
+        self.orders      = []
         self.conversions = 0
-        self.unpackObservations(state.observations.conversionObservations["MAGNIFICENT_MACARONS"])
-        self.act(state)
-        return self.orders, self.conversions
-    
-    def unpackObservations(self, conversionObservations: ConversionObservation):
-        self.bidPrice = conversionObservations.bidPrice
-        self.askPrice = conversionObservations.askPrice
-        self.transportFees = conversionObservations.transportFees
-        self.exportTariff = conversionObservations.exportTariff
-        self.importTariff = conversionObservations.importTariff
-        self.sugarPrice = conversionObservations.sugarPrice
-        self.sunlightIndex = conversionObservations.sunlightIndex
+
+        conv: ConversionObservation = state.observations.conversionObservations[self.symbol]
+        self.ask       = conv.askPrice
+        self.bid       = conv.bidPrice
+        self.t_fees    = conv.transportFees
+        self.i_tariff  = conv.importTariff
+        self.e_tariff  = conv.exportTariff
+        self.sun_index = conv.sunlightIndex
+
+        depth = state.order_depths[self.symbol]
+        if not depth.buy_orders or not depth.sell_orders:
+            return self.orders, self.conversions
+        best_bid = max(depth.buy_orders)
+        best_ask = min(depth.sell_orders)
+
+        conv_cost = self.ask + self.t_fees + self.i_tariff
+        conv_rev  = self.bid - (self.t_fees + self.e_tariff)
+        pos = state.position.get(self.symbol, 0)
+
+        # convert to other island if worth based on mid
+        if pos > 0 and conv_rev > best_ask:
+            logger.print("Worth sell")
+            qty = min(pos, self.conversion_limit)
+            self.conversions -= qty
+            pos -= qty
+        if pos < 0 and conv_cost < best_bid:
+            logger.print("Worth buy")
+            qty = max(-pos, -self.conversion_limit)
+            self.conversions += qty
+            pos += qty
         
-    def get_predicted_future_value(self, state):
-        pass
-    
-    def get_mid_price(self, state):
-        pass
-    
-    def act(self, state: TradingState):
-        pass
+        to_buy = self.conversion_limit - pos
+        to_sell = self.conversion_limit + pos
+        # sweep ask/bid if worth to convert
+        for ask_p, ask_v in sorted(depth.sell_orders.items()):
+            if to_buy <= 0 or ask_p >= conv_rev: 
+                break
+            logger.print("sweep asks")
+            qty = min(-ask_v, to_buy)
+            self.buy(ask_p, qty)
+            to_buy -= qty
+
+        for bid_p, bid_v in sorted(depth.buy_orders.items(), reverse=True):
+            if to_sell <= 0 or bid_p <= conv_cost:
+                break
+            logger.print("sweep bids")
+            qty = min(bid_v, to_sell)
+            self.sell(bid_p, qty)
+            to_sell -= qty
+            
+        if to_buy > 0:
+            self.buy(best_bid + 1, to_buy)
+
+        if to_sell > 0:
+            self.sell(best_ask - 1, to_sell)
+        
+        return self.orders, self.conversions
+
+
         
         
         
@@ -197,7 +248,14 @@ class Trader:
         }
         
         self.strategies = {
-            "MAGNIFICIENT_MACARONS": MacaronStrategy("MAGNIFICENT_MACARONS", limits["MAGNIFICENT_MACARONS"], limits["MAGNIFICENT_MACARONS_CONVERSIONS"])
+            "MAGNIFICIENT_MACARONS": MacaronStrategy(
+                symbol="MAGNIFICENT_MACARONS",
+                limit=limits["MAGNIFICENT_MACARONS"],
+                conversion_limit=limits["MAGNIFICENT_MACARONS_CONVERSIONS"],
+                enter_csi=45.0,
+                exit_csi=47.0,
+                persistence=17
+            )
         }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
@@ -225,7 +283,6 @@ class Trader:
             new_trader_data[key] = strategy.save()
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, orders, conversions, trader_data)
-        #  Plot only once — at the very end of the run
        
 
         return orders, conversions, trader_data
