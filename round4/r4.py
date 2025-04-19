@@ -1025,11 +1025,11 @@ def implied_volatility_bisection(S: float, K: float, T: float, market_price: flo
     # If maximum iterations reached, return the midpoint as the best approximation.
     return (lower + upper) / 2.0
 
-a_svi     = 0.00098
-b_svi     = 0.12500
-rho_svi   = -0.87949
-mu_svi    = -0.48127
-sigma_svi = 0.29483
+a_svi     = 0.01076
+b_svi     = 0.04968
+rho_svi   = 0.79812
+mu_svi    = 0.19866
+sigma_svi = 0.08227
 
 def iv_svi(m: float) -> float:
     """
@@ -1046,7 +1046,7 @@ import numpy as np
 from statistics import NormalDist
 
 EXPIRY_DAY = 8
-CURRENT_ROUND = 1
+CURRENT_ROUND = 3
 
 class VolatilitySpreadStrategy:
     def __init__(self, symbols: list[str], strike_prices: list[int], limits: Dict[str, int]) -> None:

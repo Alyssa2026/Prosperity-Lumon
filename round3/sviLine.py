@@ -36,8 +36,8 @@ voucher_strikes = {
 }
 
 df_list = []
-for day in (0,1,2):
-    d = pd.read_csv(f"./round3/data/prices_round_3_day_{day}.csv", sep=";")
+for day in (3,):
+    d = pd.read_csv(f"./round3/data/prices_round_7_day_{day}.csv", sep=";")
     d["timestamp"] += day * 1000000
     df_list.append(d)
 df = pd.concat(df_list, ignore_index=True)
@@ -74,9 +74,9 @@ for ts in df["timestamp"].unique():
         m  = math.log(K/spot) / math.sqrt(TTE)
         iv = implied_volatility(spot, K, TTE, mid)
         
-        intrinsic = max(0.0, spot - K)
-        if mid <= intrinsic:  
-            continue
+        # intrinsic = max(0.0, spot - K)
+        # if mid <= intrinsic:  
+        #     continue
         
         if not math.isnan(iv) and not math.isinf(iv):
             data.append((m, iv))
