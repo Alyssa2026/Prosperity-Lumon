@@ -7,7 +7,7 @@ from scipy.optimize import brentq
 from scipy.stats import zscore
 
 # Load the CSV
-csv_path = "/Users/lianli/Desktop/Prosperity-Lumon/round3/data/prices_round_3_day_0.csv"
+csv_path = "./data/prices_round_3_day_0.csv"
 df = pd.read_csv(csv_path, sep=";")
 
 # Define the strikes
@@ -66,18 +66,9 @@ for timestamp in df["timestamp"].unique():
 # Convert to array
 m_iv_array = np.array(m_iv_pairs)
 
-# --- Outlier Removal (Percentile) ---
-ivs_raw = m_iv_array[:, 1]
-lower, upper = np.percentile(ivs_raw, [30, 70])
-filtered_percentile = m_iv_array[(ivs_raw >= lower) & (ivs_raw <= upper)]
-
-# --- Outlier Removal (Z-score) ---
-ivs_zscores = zscore(filtered_percentile[:, 1])
-filtered_final = filtered_percentile[np.abs(ivs_zscores) < 2]
-
 # Unpack final cleaned data
-ms = filtered_final[:, 0]
-ivs = filtered_final[:, 1]
+ms = m_iv_array[:, 0]
+ivs = m_iv_array[:, 1]
 
 # Fit parabola
 a, b, c = np.polyfit(ms, ivs, 2)
