@@ -662,11 +662,6 @@ from statistics import NormalDist
 from datamodel import Order, TradingState, Symbol
 from typing import Any, Dict, List, TypeAlias
 
-# Hard-coded historical smile coefficients.
-A = -0.194645
-B = -0.131318
-C = 0.152477
-
 # Helper functions.
 def bs_call_price(S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float:
     if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
@@ -703,95 +698,142 @@ def implied_volatility_bisection(S: float, K: float, T: float, market_price: flo
     # If maximum iterations reached, return the midpoint as the best approximation.
     return (lower + upper) / 2.0
 
-def iv_theory(m: float) -> float:
-    return A * m**2 + B * m + C
+a_svi     = 0.00098
+b_svi     = 0.12500
+rho_svi   = -0.87949
+mu_svi    = -0.48127
+sigma_svi = 0.29483
+
+def iv_svi(m: float) -> float:
+    """
+    Given m = log(K/S)/sqrt(T), returns implied vol from your SVI slice fit.
+    """
+    w = a_svi + b_svi * (
+        rho_svi * (m - mu_svi)
+        + math.sqrt((m - mu_svi) ** 2 + sigma_svi**2)
+    )
+    return math.sqrt(max(w, 0.0))
+
+import math
+import numpy as np
+from statistics import NormalDist
 
 EXPIRY_DAY = 8
-CURRENT_ROUND = 0
+CURRENT_ROUND = 1
 
 class VolatilitySpreadStrategy:
-    def __init__(self, symbols: list[str], strike_prices: list[int], limit: int) -> None:
-        self.symbols = symbols
+    def __init__(self, symbols: list[str], strike_prices: list[int], limits: Dict[str, int]) -> None:
+        self.symbols       = symbols
         self.strike_prices = strike_prices
-        self.limit = limit
+        self.limits         = limits
         self.orders: Dict[str, List[Order]] = {}
-        
+
+    def buy(self, symbol: str, price: int, quantity: int) -> None:
+        # positive quantity means buy, per your conventions
+        self.orders.setdefault(symbol, []).append(Order(symbol, price,  quantity))
+
+    def sell(self, symbol: str, price: int, quantity: int) -> None:
+        # positive quantity passed in, but Order expects negative for a sell
+        self.orders.setdefault(symbol, []).append(Order(symbol, price, -quantity))
+
     def get_TTE(self, state: TradingState) -> float:
-        fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
-        days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
-        return days_to_expiry / 365.0
+        fractional = CURRENT_ROUND + (state.timestamp / 1_000_000)
+        days       = max(0.0, EXPIRY_DAY - fractional)
+        return days / 365.0
 
     def act(self, state: TradingState) -> None:
-        spot_depth = state.order_depths.get("VOLCANIC_ROCK")
-        if not spot_depth or not spot_depth.buy_orders or not spot_depth.sell_orders:
+        # 1) Fetch spot & TTE
+        od0 = state.order_depths.get("VOLCANIC_ROCK")
+        if not od0 or not od0.buy_orders or not od0.sell_orders:
+            return
+        spot_mid = (max(od0.buy_orders) + min(od0.sell_orders)) // 2
+        TTE      = self.get_TTE(state)
+        if TTE <= 0:
             return
 
-        spot_mid = (max(spot_depth.buy_orders) + min(spot_depth.sell_orders)) / 2
-        TTE      = self.get_TTE(state)
+        # reset orders
         self.orders = {}
 
-        for symbol, strike in zip(self.symbols, self.strike_prices):
-            depth = state.order_depths.get(symbol)
-            if not depth or not depth.buy_orders or not depth.sell_orders:
+        # 2) Build option‐leg trades
+        for sym, K in zip(self.symbols, self.strike_prices):
+            d = state.order_depths.get(sym)
+            if not d or not d.buy_orders or not d.sell_orders:
                 continue
 
-            # voucher bid/ask/mid and its spread
-            voucher_bid = max(depth.buy_orders.keys())
-            voucher_ask = min(depth.sell_orders.keys())
-            voucher_mid = (voucher_bid + voucher_ask) / 2
-            spread      = voucher_ask - voucher_bid
+            # fair price from SVI
+            m          = math.log(K/spot_mid) / math.sqrt(TTE)
+            theo_iv    = iv_svi(m)
+            theo_price = BlackScholes.black_scholes_call(spot_mid, K, TTE, theo_iv)
 
-            # theoretical price
-            moneyness   = math.log(strike / spot_mid) / math.sqrt(TTE)
-            theo_iv     = iv_theory(moneyness)
-            theo_price  = BlackScholes.black_scholes_call(spot_mid, strike, TTE, theo_iv)
+            # determine how many we can buy/sell
+            to_buy  = self.limits[sym] - state.position.get(sym, 0)
+            to_sell = self.limits[sym] + state.position.get(sym, 0)
 
-            logger.print(f"{symbol}: mid={voucher_mid:.2f}, theo={theo_price:.2f}, spread={spread:.2f}")
-
-            orders = []
-
-            # 1) BUY from asks while mispricing > spread
-            to_buy = self.limit - state.position.get(symbol, 0)
-            for ask_p, ask_v in sorted(depth.sell_orders.items()):
-                if to_buy <= 0:
+            # BUY from asks
+            for ask_p, ask_v in sorted(d.sell_orders.items()):
+                if to_buy <= 0 or ask_p >= theo_price:
                     break
-                profit_per = theo_price - ask_p
-                if profit_per <= spread / 2:
-                    break
-                qty = min(ask_v, to_buy)
-                orders.append(Order(symbol, ask_p, -qty))
+                qty = min(-ask_v, to_buy)
+                self.buy(sym, ask_p, qty)
                 to_buy -= qty
 
-            # 2) SELL into bids while mispricing > spread
-            to_sell = self.limit + state.position.get(symbol, 0)
-            for bid_p, bid_v in sorted(depth.buy_orders.items(), reverse=True):
-                if to_sell <= 0:
-                    break
-                profit_per = bid_p - theo_price
-                if profit_per <= spread / 2:
+            # SELL into bids
+            for bid_p, bid_v in sorted(d.buy_orders.items(), reverse=True):
+                if to_sell <= 0 or bid_p <= theo_price:
                     break
                 qty = min(bid_v, to_sell)
-                orders.append(Order(symbol, bid_p, qty))
+                self.sell(sym, bid_p, qty)
                 to_sell -= qty
 
-            # 3) EXIT if we still hold position but no mispricing left
-            position = state.position.get(symbol, 0)
-            diff     = abs(theo_price - voucher_mid)
-            if position != 0 and diff <= spread / 2:
-                # unwind entire position at top of book
-                if position > 0:
-                    # sell what we’re long
-                    orders.append(Order(symbol, voucher_bid, -position))
-                else:
-                    # buy back what we’re short
-                    orders.append(Order(symbol, voucher_ask, -position))
 
-            if orders:
-                self.orders[symbol] = orders
+        # 3) Compute net delta of the combined book
+        net_delta = 0.0
+        for sym, K in zip(self.symbols, self.strike_prices):
+            curr    = state.position.get(sym, 0)
+            traded  = sum(o.quantity for o in self.orders.get(sym, []))
+            post_q  = curr + traded
 
+            # market mid‐price for this strike
+            d       = state.order_depths[sym]
+            if not d.sell_orders or not d.buy_orders:
+                return # skip hedging this tick
+            mid     = (min(d.sell_orders) + max(d.buy_orders)) / 2
+
+            # solve the market IV from that mid
+            mkt_iv  = BlackScholes.implied_volatility(mid, spot_mid, K, TTE)
+            # get the true ∂C/∂S
+            dlt     = BlackScholes.delta(spot_mid, K, TTE, mkt_iv)
+
+            net_delta += post_q * dlt
+
+        # 4) Solve & clamp for rock hedge
+        curr_rock   = state.position.get("VOLCANIC_ROCK", 0)
+        change      = curr_rock - round(net_delta)
+        logger.print("delta=", net_delta, "change=", change)
+        # 5) Stepped hedge
+        if change > 0:
+            # BUY rock (positive change) off the ask‐side
+            to_buy = min(change, 400 - curr_rock)
+            logger.print("to_buy", to_buy)
+            for ask_p, ask_v in sorted(od0.sell_orders.items()):
+                if to_buy <= 0:
+                    break
+                qty = min(-ask_v, to_buy)
+                logger.print("qty=", qty)
+                self.buy("VOLCANIC_ROCK", ask_p, qty)
+                to_buy -= qty
+
+        elif change < 0:
+            # SELL rock (negative change) into the bid‐side
+            to_sell = min(abs(change), 400 + curr_rock)
+            for bid_p, bid_v in sorted(od0.buy_orders.items(), reverse=True):
+                if to_sell <= 0:
+                    break
+                qty = min(bid_v, to_sell)
+                self.sell("VOLCANIC_ROCK", bid_p, qty)
+                to_sell -= qty
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
-        self.orders = {}
         self.act(state)
         return self.orders
 
@@ -800,6 +842,8 @@ class VolatilitySpreadStrategy:
 
     def load(self, data: JSON) -> None:
         pass
+
+
        
      
 # Modified Trader that integrates the pairs strategy.
@@ -814,7 +858,7 @@ class Trader:
             "DJEMBES": 0,
             "PICNIC_BASKET1": 0,
             "PICNIC_BASKET2": 0,
-            "VOLCANIC_ROCK": 0,
+            "VOLCANIC_ROCK": 400,
             "VOLCANIC_ROCK_VOUCHER_9500": 200,
             "VOLCANIC_ROCK_VOUCHER_9750": 200,
             "VOLCANIC_ROCK_VOUCHER_10000": 200,
@@ -862,12 +906,10 @@ class Trader:
         #                                                        exit_z=0.2,
         #                                                        hist_std=0.006110812702837127),
         "VOLCANIC_SPREAD": VolatilitySpreadStrategy(
-                            symbols=["VOLCANIC_ROCK_VOUCHER_9500", "VOLCANIC_ROCK_VOUCHER_9750", "VOLCANIC_ROCK_VOUCHER_10000"
+                            symbols=["VOLCANIC_ROCK_VOUCHER_9500", "VOLCANIC_ROCK_VOUCHER_9750", "VOLCANIC_ROCK_VOUCHER_10000",
                                     "VOLCANIC_ROCK_VOUCHER_10250", "VOLCANIC_ROCK_VOUCHER_10500"],
                             strike_prices=[9500, 9750, 10000, 10250, 10500],
-                            limit=200,
-                         
-
+                            limits=limits,
                             ),
     #      "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy(
     #     "VOLCANIC_ROCK_VOUCHER_9500", 200, 9500,
