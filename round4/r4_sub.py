@@ -1,19 +1,11 @@
 import json
 from abc import abstractmethod
-from math import log, sqrt, exp
+from math import log, sqrt
 import math
 from statistics import NormalDist
 import numpy as np
-from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-from typing import Any, Dict, List, TypeAlias
-from statistics import NormalDist
-from math import log, sqrt, exp
+from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState, ConversionObservation
 from collections import deque
-from datamodel import Order, TradingState, Symbol
-from collections import deque
-import math
-from statistics import NormalDist
-from datamodel import Order, TradingState, Symbol
 from typing import Any, Dict, List, TypeAlias
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
@@ -664,8 +656,6 @@ BASKET_WEIGHTS = {
     Product.DJEMBES: 1,
 }
 
-from collections import deque
-
 class BasketTrader:
     def __init__(self, symbol: str, limit: int):
         self.symbol = symbol
@@ -874,7 +864,6 @@ class BasketTrader2:
                 
             )
             synthetic_depth.sell_orders[implied_ask] = -vol_ask
-        logger.print("synth")
         logger.print(synthetic_depth.sell_orders)
         return synthetic_depth
 
@@ -933,8 +922,6 @@ class BasketTrader2:
         # Dynamic threshold using std deviation
         if len(self.spread_history) >= 10:
             spread_std = np.std(self.spread_history)
-            logger.print("printin stdddd")
-            logger.print(spread_std)
             threshold = max(30, spread_std *30)  # Don't go too low
         
         else:
@@ -1041,12 +1028,9 @@ def iv_svi(m: float) -> float:
     )
     return math.sqrt(max(w, 0.0))
 
-import math
-import numpy as np
-from statistics import NormalDist
 
 EXPIRY_DAY = 8
-CURRENT_ROUND = 3
+CURRENT_ROUND = 4
 
 class VolatilitySpreadStrategy:
     def __init__(self, symbols: list[str], strike_prices: list[int], limits: Dict[str, int]) -> None:
@@ -1136,17 +1120,14 @@ class VolatilitySpreadStrategy:
         # 4) Solve & clamp for rock hedge
         curr_rock   = state.position.get("VOLCANIC_ROCK", 0)
         change      = curr_rock - round(net_delta)
-        logger.print("delta=", net_delta, "change=", change)
         # 5) Stepped hedge
         if change > 0:
             # BUY rock (positive change) off the ask‐side
             to_buy = min(change, 400 - curr_rock)
-            logger.print("to_buy", to_buy)
             for ask_p, ask_v in sorted(od0.sell_orders.items()):
                 if to_buy <= 0:
                     break
                 qty = min(-ask_v, to_buy)
-                logger.print("qty=", qty)
                 self.buy("VOLCANIC_ROCK", ask_p, qty)
                 to_buy -= qty
 
@@ -1170,6 +1151,76 @@ class VolatilitySpreadStrategy:
     def load(self, data: JSON) -> None:
         pass
 
+class MacaronStrategy(Strategy):
+    def __init__(self,
+                 symbol: str,
+                 limit: int,
+                 conversion_limit: int,
+                 ) -> None:
+        super().__init__(symbol, limit)
+        self.conversion_limit = conversion_limit
+
+        # track the “fresh” persistence since crossing below enter_csi
+        self.prev_low = False
+        self.persist  = 0
+
+    def run(self, state: TradingState) -> tuple[list[Order], int]:
+        self.orders      = []
+        self.conversions = 0
+
+        conv: ConversionObservation = state.observations.conversionObservations[self.symbol]
+        self.ask       = conv.askPrice
+        self.bid       = conv.bidPrice
+        self.t_fees    = conv.transportFees
+        self.i_tariff  = conv.importTariff
+        self.e_tariff  = conv.exportTariff
+        self.sun_index = conv.sunlightIndex
+
+        depth = state.order_depths[self.symbol]
+        if not depth.buy_orders or not depth.sell_orders:
+            return self.orders, self.conversions
+        best_bid = max(depth.buy_orders)
+        best_ask = min(depth.sell_orders)
+
+        conv_cost = self.ask + self.t_fees + self.i_tariff
+        conv_rev  = self.bid - (self.t_fees + self.e_tariff)
+        pos = state.position.get(self.symbol, 0)
+
+        # convert to other island if worth based on mid
+        if pos > 0 and conv_rev > best_ask:
+            qty = min(pos, self.conversion_limit)
+            self.conversions -= qty
+            pos -= qty
+        if pos < 0 and conv_cost < best_bid:
+            qty = max(-pos, -self.conversion_limit)
+            self.conversions += qty
+            pos += qty
+        
+        to_buy = self.conversion_limit - pos
+        to_sell = self.conversion_limit + pos
+        # sweep ask/bid if worth to convert
+        for ask_p, ask_v in sorted(depth.sell_orders.items()):
+            if to_buy <= 0 or ask_p >= conv_rev: 
+                break
+            qty = min(-ask_v, to_buy)
+            self.buy(ask_p, qty)
+            to_buy -= qty
+
+        for bid_p, bid_v in sorted(depth.buy_orders.items(), reverse=True):
+            if to_sell <= 0 or bid_p <= conv_cost:
+                break
+            qty = min(bid_v, to_sell)
+            self.sell(bid_p, qty)
+            to_sell -= qty
+            
+        if to_buy > 0:
+            self.buy(best_bid + 1, to_buy)
+
+        if to_sell > 0:
+            self.sell(best_ask - 1, to_sell)
+        
+        return self.orders, self.conversions
+    
 class Trader:
     def __init__(self) -> None:
         limits = {
@@ -1183,7 +1234,9 @@ class Trader:
             "VOLCANIC_ROCK_VOUCHER_9750": 200,
             "VOLCANIC_ROCK_VOUCHER_10000": 200,
             "VOLCANIC_ROCK_VOUCHER_10250": 200,
-            "VOLCANIC_ROCK_VOUCHER_10500": 200
+            "VOLCANIC_ROCK_VOUCHER_10500": 200,
+            "MAGNIFICENT_MACARONS": 75,
+            "MAGNIFICENT_MACARONS_CONVERSIONS":10,
         }
         
         self.strategies = {
@@ -1198,6 +1251,11 @@ class Trader:
                             strike_prices=[9500, 9750, 10000, 10250, 10500],
                             limits=limits,
                             ),
+            "MAGNIFICIENT_MACARONS": MacaronStrategy(
+                symbol="MAGNIFICENT_MACARONS",
+                limit=limits["MAGNIFICENT_MACARONS"],
+                conversion_limit=limits["MAGNIFICENT_MACARONS_CONVERSIONS"],
+            )
         }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
@@ -1214,7 +1272,10 @@ class Trader:
                 strategy.load(old_trader_data[key])
             result = strategy.run(state)
             
-            if isinstance(result, list):  # single-symbol strategy
+            if isinstance(strategy, MacaronStrategy):
+                orders[strategy.symbol] = result[0]
+                conversions = result[1]
+            elif isinstance(result, list):  # single-symbol strategy
                 orders[strategy.symbol] = result
             elif isinstance(result, dict):  # multi-symbol strategy
                 orders.update(result)
