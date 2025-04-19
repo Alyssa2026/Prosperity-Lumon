@@ -656,7 +656,7 @@ def compute_mid_price(order_depth: OrderDepth) -> float | None:
     return (best_bid + best_ask) / 2
 
 EXPIRY_DAY = 8
-CURRENT_ROUND = 3
+CURRENT_ROUND = 0
 
 import math
 from statistics import NormalDist
@@ -829,7 +829,86 @@ class VolcanicVoucherStrategy(Strategy):
         elif z < self.exit_z:
             # Exit short: Buy all at current best ask.
             self.buy(round(mid_price), self.limit)
+class VolatilitySpreadStrategy(Strategy):
+    def __init__(self, symbols: list[str], strike_prices: list[int], limit: int) -> None:
+        super().__init__("VOLCANIC_SPREAD", limit)
+        self.symbols = symbols
+        self.strike_prices = strike_prices
+        self.limit = limit
+        self.entry_threshold = 0.02
+        self.exit_threshold = 0.001
 
+    def act(self, state: TradingState) -> None:
+        spot_depth = state.order_depths.get("VOLCANIC_ROCK")
+        if not spot_depth or not spot_depth.buy_orders or not spot_depth.sell_orders:
+            return
+
+        spot_bid = max(spot_depth.buy_orders.keys())
+        spot_ask = min(spot_depth.sell_orders.keys())
+        spot_mid = (spot_bid + spot_ask) / 2
+
+        fractional_day = CURRENT_ROUND + (state.timestamp / 1_000_000)
+        days_to_expiry = max(0.0, EXPIRY_DAY - fractional_day)
+        TTE = days_to_expiry / 365.0
+
+        for symbol, strike in zip(self.symbols, self.strike_prices):
+            depth = state.order_depths.get(symbol)
+            if not depth or not depth.buy_orders or not depth.sell_orders:
+                continue
+
+            bid = max(depth.buy_orders.keys())
+            ask = min(depth.sell_orders.keys())
+            mid = (bid + ask) / 2
+
+            m = math.log(strike / spot_mid) / math.sqrt(TTE)
+            theo_iv = iv_theory(m)
+            actual_iv = implied_volatility_bisection(spot_mid, strike, TTE, mid)
+
+            if actual_iv <= 0 or math.isnan(actual_iv):
+                continue
+
+            delta_iv = actual_iv - theo_iv
+            position = state.position.get(symbol, 0)
+            trade_size = self.limit // 2
+
+            logger.print(f"{symbol}: ΔIV = {delta_iv:.4f}, Position = {position}")
+
+            if delta_iv > self.entry_threshold:
+                # OVERPRICED: SELL
+                filled = 0
+                for p, v in sorted(depth.buy_orders.items(), reverse=True):
+                    q = min(trade_size - filled, v)
+                    self.orders.append(Order(symbol, p, -q))
+                    filled += q
+                    if filled >= trade_size:
+                        break
+                if filled < trade_size:
+                    self.orders.append(Order(symbol, round(mid), -(trade_size - filled)))
+
+            elif delta_iv < -self.entry_threshold:
+                # UNDERPRICED: BUY
+                filled = 0
+                for p, v in sorted(depth.sell_orders.items()):
+                    q = min(trade_size - filled, v)
+                    self.orders.append(Order(symbol, p, q))
+                    filled += q
+                    if filled >= trade_size:
+                        break
+                if filled < trade_size:
+                    self.orders.append(Order(symbol, round(mid), trade_size - filled))
+
+            elif abs(delta_iv) < self.exit_threshold and position != 0:
+                # CLOSE THE POSITION NEAR FAIR VALUE
+                if position > 0:
+                    # Sell to exit long
+                    self.orders.append(Order(symbol, bid, -position))
+                elif position < 0:
+                    # Buy to exit short
+                    self.orders.append(Order(symbol, ask, -position))
+
+
+
+       
      
 # Modified Trader that integrates the pairs strategy.
 class Trader:
@@ -890,21 +969,31 @@ class Trader:
                                                                sell_z=1,
                                                                exit_z=0.2,
                                                                hist_std=0.006110812702837127),
-                                                                "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy(
-        "VOLCANIC_ROCK_VOUCHER_9500", 200, 9500,
-        buy_z=0.75, sell_z=float("inf"), exit_z=0.15, hist_std=0.004),
-    
-        "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy(
-            "VOLCANIC_ROCK_VOUCHER_9750", 200, 9750,
-            buy_z=0.5, sell_z=float("inf"), exit_z=0.15, hist_std=0.005),
-        
-        "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy(
-            "VOLCANIC_ROCK_VOUCHER_10250", 200, 10250,
-            buy_z=0.75, sell_z=1.75, exit_z=0.25, hist_std=0.007),
+        "VOLCANIC_SPREAD": VolatilitySpreadStrategy(
+                            symbols=["VOLCANIC_ROCK_VOUCHER_9500", "VOLCANIC_ROCK_VOUCHER_9750", 
+                                    "VOLCANIC_ROCK_VOUCHER_10250", "VOLCANIC_ROCK_VOUCHER_10500"],
+                            strike_prices=[9500, 9750, 10250, 10500],
+                            limit=200,
+                         
 
-        "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy(
-            "VOLCANIC_ROCK_VOUCHER_10500", 200, 10500,
-            buy_z=1.0, sell_z=1.0, exit_z=0.2, hist_std=0.0065),
+                            ),
+    #      "VOLCANIC_ROCK_VOUCHER_9500": VolcanicVoucherStrategy(
+    #     "VOLCANIC_ROCK_VOUCHER_9500", 200, 9500,
+    #     buy_z=0.75, sell_z=float("inf"), exit_z=0.0001, hist_std=0.127726597171449),
+    
+    # "VOLCANIC_ROCK_VOUCHER_9750": VolcanicVoucherStrategy(
+    #     "VOLCANIC_ROCK_VOUCHER_9750", 200, 9750,
+    #     buy_z=0.5, sell_z=float("inf"), exit_z=0.0001, hist_std=0.06377728168404621),
+    
+    # "VOLCANIC_ROCK_VOUCHER_10250": VolcanicVoucherStrategy(
+    #     "VOLCANIC_ROCK_VOUCHER_10250", 200, 10250,
+    #     buy_z=0.75, sell_z=1.75, exit_z=0.0001, hist_std=0.002349447972812647),
+
+    # "VOLCANIC_ROCK_VOUCHER_10500": VolcanicVoucherStrategy(
+    #     "VOLCANIC_ROCK_VOUCHER_10500", 200, 10500,
+    #     buy_z=1.0, sell_z=1.0, exit_z=0.0001, hist_std=0.002407204136058266),
+    
+     
         }
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
