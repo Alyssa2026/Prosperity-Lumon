@@ -192,8 +192,13 @@ class MacaronStrategy(Strategy):
         self.mid_window = deque(maxlen=50)
 
     def run(self, state: TradingState) -> Tuple[List[Order], int]:
-        conv = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
-        self.unpackObservations(conv)
+        self.orders = []
+        self.conversions = 0
+        if self.symbol in state.observations.conversionObservations:
+            conv = state.observations.conversionObservations[self.symbol]
+            self.unpackObservations(conv)
+        else:
+            return self.orders, self.conversions
 
         # update feature deques
         for f in self.orig_feats:
@@ -204,8 +209,6 @@ class MacaronStrategy(Strategy):
         if mid is not None:
             self.mid_window.append(mid)
 
-        self.orders      = []
-        self.conversions = 0
         self.act(state)
         return self.orders, self.conversions
 
@@ -342,4 +345,4 @@ class Trader:
         #  Plot only once — at the very end of the run
        
 
-        return orders, conversions, trader_data
+        return orders, 1, trader_data
