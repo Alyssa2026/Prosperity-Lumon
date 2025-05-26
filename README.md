@@ -70,6 +70,15 @@ prosperity3bt tutorial/tutorial.py 1 --vis --match-trades worse
 - Overall: 180  
 - Manual: 119
 
+</details></details>
+<details>
+
+<summary><h2>Final Result</h2></summary>
+<ul>
+  <li>Country: 52</li>
+  <li>Overall: 180</li>
+  <li>Manual: 119</li>
+</ul>
 </details>
 
 
