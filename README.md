@@ -23,8 +23,50 @@
 - [IMC Prosperity 3 Visualizer](https://github.com/jmerle/imc-prosperity-3-visualizer)  
 </details>
 <details>
+<summary><h2> Set Up</h2></summary>
+
+## Create Environment 
+- Install Conda
+- Create environment 
+```
+conda create --name lumon python=3.12
+```
+- Activate environment 
+```
+conda activate lumon
+```
+- Install dependencies 
+```
+pip install -r requirements.txt 
+```
+## Run Code
+
+Use this command to run
+```console
+prosperity3bt tutorial/tutorial.py 0 --vis --match-trades worse
+```
+- ```prosperity3bt``` is the backtester command
+- ```tutorial/tutorial.py``` path to trader file
+- ```0``` is the day to run the backtester for
+- ```--vis``` is to open results in visualiser 
+- ```--match-trades``` worse (need to test which option is most accurate but from reading chat sounds like this is it - matches your orders against trades that happened at worse prices than what you put out)
+
+## Stay updated
+
+run
+```
+pip install -U prosperity3bt
+```
+use the right round
+```
+prosperity3bt tutorial/tutorial.py 1 --vis --match-trades worse
+```
+
+</details>
+<details>
 <summary><h2> Final Result</h2></summary>
 - Country: 52
 - Overall: 180
+
 
 
