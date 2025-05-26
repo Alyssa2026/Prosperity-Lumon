@@ -62,11 +62,14 @@ use the right round
 prosperity3bt tutorial/tutorial.py 1 --vis --match-trades worse
 ```
 
-</details>
 <details>
-<summary><h2> Final Result</h2></summary>
-- Country: 52
-- Overall: 180
+<summary><h2>Final Result</h2></summary>
+
+- Country: 52  
+- Overall: 180  
+- Manual: 119
+
+</details>
 
 
 
